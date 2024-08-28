@@ -67,8 +67,8 @@ services:
       NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
     ports:
       - "4040:4040"  # NGROK web interface
-    depends_on:
-      - relay-go
+    # depends_on:
+    #   - relay-go
     networks:
       - kafka-net
 
