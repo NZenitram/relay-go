@@ -61,12 +61,20 @@ func main() {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		handleRequest(w, r, producer, emailTopic)
+
+		// Pass the body to handleRequest after successful validation
+		handleRequest(w, body, producer, emailTopic)
 	})
 
 	// Set up the HTTP server for webhooks
 	http.HandleFunc("/webhook-events", func(w http.ResponseWriter, r *http.Request) {
-		handleRequest(w, r, producer, webhookTopic)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		defer r.Body.Close()
+		handleRequest(w, body, producer, webhookTopic)
 	})
 
 	// Listen on the specified port
@@ -76,15 +84,7 @@ func main() {
 	}
 }
 
-func handleRequest(w http.ResponseWriter, r *http.Request, producer sarama.SyncProducer, topic string) {
-	// Read the request body
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "Failed to read request body", http.StatusInternalServerError)
-		return
-	}
-	defer r.Body.Close()
-
+func handleRequest(w http.ResponseWriter, body []byte, producer sarama.SyncProducer, topic string) {
 	// Produce the message to Kafka
 	msg := &sarama.ProducerMessage{
 		Topic: topic,
