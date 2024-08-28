@@ -1,5 +1,3 @@
-version: '3'
-
 services:
   kafka:
     image: apache/kafka:3.8.0
@@ -30,7 +28,6 @@ services:
       timeout: 2s
       retries: 5
       start_period: 5s
-
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
     container_name: kafka-ui
@@ -44,7 +41,6 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
     depends_on:
       - kafka
-
   relay-go:
     build:
       context: .
@@ -55,10 +51,24 @@ services:
         condition: service_healthy
     environment:
       KAFKA_BROKERS: kafka:9092
-      KAFKA_TOPIC: emails
+      EMAIL_TOPIC: emails
+      WEBHOOK_TOPIC: webhook-events
       HTTP_SERVER_PORT: 8888
     ports:
       - "8888:8888"
+    networks:
+      - kafka-net
+  ngrok:
+    image: ngrok/ngrok:latest
+    container_name: ngrok
+    command: 
+      http --domain=${NGROK_PUBLIC_URL} relay-go:8888
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    ports:
+      - "4040:4040"  # NGROK web interface
+    depends_on:
+      - relay-go
     networks:
       - kafka-net
 
