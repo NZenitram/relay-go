@@ -62,9 +62,9 @@ services:
     image: ngrok/ngrok:latest
     container_name: ngrok
     command: 
-      http --domain=horribly-striking-joey.ngrok-free.app relay-go:8888
+      http --domain=${NGROK_PUBLIC_URL} relay-go:8888
     environment:
-      NGROK_AUTHTOKEN: 2O7g2BRMQ9vyA2lngasdeVnQPte_4NPHebFZ5xeeB3ftLtsok
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
     ports:
       - "4040:4040"  # NGROK web interface
     depends_on:
