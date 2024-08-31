@@ -14,7 +14,6 @@ import (
 )
 
 func main() {
-
 	err := godotenv.Load()
 	if err != nil {
 		log.Println("No .env file found, using system environment variables")
@@ -30,9 +29,24 @@ func main() {
 		log.Fatal("EMAIL_TOPIC environment variable is not set")
 	}
 
-	webhookTopic := os.Getenv("WEBHOOK_TOPIC")
-	if webhookTopic == "" {
-		log.Fatal("WEBHOOK_TOPIC environment variable is not set")
+	webhookTopicSendGrid := os.Getenv("WEBHOOK_TOPIC_SENDGRID")
+	if webhookTopicSendGrid == "" {
+		log.Fatal("WEBHOOK_TOPIC_SENDGRID environment variable is not set")
+	}
+
+	webhookTopicSparkpost := os.Getenv("WEBHOOK_TOPIC_SPARKPOST")
+	if webhookTopicSparkpost == "" {
+		log.Fatal("WEBHOOK_TOPIC_SPARKPOST environment variable is not set")
+	}
+
+	webhookTopicPostmark := os.Getenv("WEBHOOK_TOPIC_POSTMARK")
+	if webhookTopicPostmark == "" {
+		log.Fatal("WEBHOOK_TOPIC_POSTMARK environment variable is not set")
+	}
+
+	webhookTopicSocketlabs := os.Getenv("WEBHOOK_TOPIC_SOCKETLABS")
+	if webhookTopicSocketlabs == "" {
+		log.Fatal("WEBHOOK_TOPIC_SOCKETLABS environment variable is not set")
 	}
 
 	port := os.Getenv("HTTP_SERVER_PORT")
@@ -62,20 +76,84 @@ func main() {
 			return
 		}
 
-		// Pass the body to handleRequest after successful validation
-		handleRequest(w, body, producer, emailTopic)
+		message := Message{
+			Headers: r.Header,
+			Body:    body,
+		}
+
+		handleRequest(w, producer, emailTopic, message)
 	})
 
 	// Set up the HTTP server for webhooks
-	http.HandleFunc("/webhook-events", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/webhook-events/sendgrid", func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
-		handleRequest(w, body, producer, webhookTopic)
+
+		message := Message{
+			Headers: r.Header,
+			Body:    body,
+		}
+
+		handleRequest(w, producer, webhookTopicSendGrid, message)
 	})
+
+	http.HandleFunc("/webhook-events/sparkpost", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		defer r.Body.Close()
+
+		message := Message{
+			Headers: r.Header,
+			Body:    body,
+		}
+
+		handleRequest(w, producer, webhookTopicSparkpost, message)
+	})
+
+	http.HandleFunc("/webhook-events/postmark", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		defer r.Body.Close()
+
+		message := Message{
+			Headers: r.Header,
+			Body:    body,
+		}
+
+		handleRequest(w, producer, webhookTopicPostmark, message)
+	})
+
+	http.HandleFunc("/webhook-events/socketlabs", func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		defer r.Body.Close()
+
+		message := Message{
+			Headers: r.Header,
+			Body:    body,
+		}
+
+		handleRequest(w, producer, webhookTopicSocketlabs, message)
+	})
+
+	// Listen on the specified port
+	log.Printf("Listening on port %s...", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		log.Fatalf("Failed to start HTTP server: %v", err)
+	}
 
 	// Listen on the specified port
 	log.Printf("Listening on port %s...", port)
@@ -84,11 +162,19 @@ func main() {
 	}
 }
 
-func handleRequest(w http.ResponseWriter, body []byte, producer sarama.SyncProducer, topic string) {
+func handleRequest(w http.ResponseWriter, producer sarama.SyncProducer, topic string, message Message) {
+	// Serialize the message to JSON
+	messageBytes, err := json.Marshal(message)
+	if err != nil {
+		http.Error(w, "Failed to serialize message", http.StatusInternalServerError)
+		log.Printf("Failed to serialize message: %v", err)
+		return
+	}
+
 	// Produce the message to Kafka
 	msg := &sarama.ProducerMessage{
 		Topic: topic,
-		Value: sarama.StringEncoder(body),
+		Value: sarama.StringEncoder(messageBytes),
 	}
 	partition, offset, err := producer.SendMessage(msg)
 	if err != nil {
@@ -164,4 +250,9 @@ type Attachment struct {
 	Name        string `json:"name"`
 	ContentType string `json:"contenttype"`
 	Content     string `json:"content"`
+}
+
+type Message struct {
+	Headers map[string][]string `json:"headers"`
+	Body    json.RawMessage     `json:"body"`
 }
