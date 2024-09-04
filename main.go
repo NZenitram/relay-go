@@ -158,6 +158,33 @@ func main() {
 		}
 		defer r.Body.Close()
 
+		// Verify the webhook and find the associated user
+		database.InitDB()
+		db := database.GetDB()
+		userID, espID, err := verifyPostmarkWebhookAndFindUser(db, r.Header)
+		if err != nil {
+			log.Printf("Failed to verify webhook: %v", err)
+			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+			return
+		}
+
+		var postmarkEvent struct {
+			MessageID string `json:"MessageID"`
+		}
+		err = json.Unmarshal(body, &postmarkEvent)
+		if err != nil {
+			log.Printf("Failed to unmarshal Postmark event: %v", err)
+			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
+			return
+		}
+
+		err = associatePostmarkEventWithUser(db, postmarkEvent.MessageID, userID, espID)
+		if err != nil {
+			log.Printf("Failed to associate event with user: %v", err)
+			http.Error(w, "Failed to process event", http.StatusInternalServerError)
+			return
+		}
+
 		message := Message{
 			Headers: r.Header,
 			Body:    body,
