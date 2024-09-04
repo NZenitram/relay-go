@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"relay-go/m/database"
+	"strings"
 
 	"github.com/IBM/sarama"
 	"github.com/joho/godotenv"
@@ -99,7 +101,7 @@ func main() {
 		db := database.GetDB()
 		userID, err := verifySendgridWebhookAndFindUser(db, body, r.Header)
 		if err != nil {
-			log.Printf("Failed to verify webhook: %v", err)
+			log.Printf("Sendgrid - Failed to verify webhook: %v", err)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
@@ -142,6 +144,34 @@ func main() {
 		}
 		defer r.Body.Close()
 
+		// Verify the webhook and find the associated user
+		database.InitDB()
+		db := database.GetDB()
+		userID, espID, err := verifySparkPostWebhookAndFindUser(db, r.Header)
+		if err != nil {
+			log.Printf("Sparkpost - Failed to verify webhook: %v", err)
+			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+			return
+		}
+
+		log.Printf("UserID: %v, ESPID: %v", userID, espID)
+
+		var sparkPostPayload SparkPostPayload
+		err = json.Unmarshal(body, &sparkPostPayload)
+		if err != nil {
+			log.Printf("Failed to unmarshal SparkPost events: %v", err)
+			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
+			return
+		}
+
+		for _, event := range sparkPostPayload {
+			err = associateSparkPostEventWithUser(db, event.Msys.MessageEvent.MessageID, userID, espID)
+			if err != nil {
+				log.Printf("Failed to associate event with user: %v", err)
+				// Decide whether to continue or return based on your error handling strategy
+			}
+		}
+
 		message := Message{
 			Headers: r.Header,
 			Body:    body,
@@ -163,7 +193,7 @@ func main() {
 		db := database.GetDB()
 		userID, espID, err := verifyPostmarkWebhookAndFindUser(db, r.Header)
 		if err != nil {
-			log.Printf("Failed to verify webhook: %v", err)
+			log.Printf("Postmark - Failed to verify webhook: %v", err)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
@@ -315,4 +345,19 @@ type Attachment struct {
 type Message struct {
 	Headers map[string][]string `json:"headers"`
 	Body    json.RawMessage     `json:"body"`
+}
+
+func decodeBasicAuth(authHeader string) (username, password string, err error) {
+	if !strings.HasPrefix(authHeader, "Basic ") {
+		return "", "", fmt.Errorf("invalid authorization header")
+	}
+	payload, err := base64.StdEncoding.DecodeString(authHeader[6:])
+	if err != nil {
+		return "", "", fmt.Errorf("invalid base64 in authorization header")
+	}
+	pair := strings.SplitN(string(payload), ":", 2)
+	if len(pair) != 2 {
+		return "", "", fmt.Errorf("invalid authorization header format")
+	}
+	return pair[0], pair[1], nil
 }

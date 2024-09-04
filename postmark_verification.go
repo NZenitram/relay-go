@@ -2,29 +2,15 @@ package main
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"fmt"
+	"log"
 	"net/http"
-	"strings"
 )
-
-func decodeBasicAuth(authHeader string) (username, password string, err error) {
-	if !strings.HasPrefix(authHeader, "Basic ") {
-		return "", "", fmt.Errorf("invalid authorization header")
-	}
-	payload, err := base64.StdEncoding.DecodeString(authHeader[6:])
-	if err != nil {
-		return "", "", fmt.Errorf("invalid base64 in authorization header")
-	}
-	pair := strings.SplitN(string(payload), ":", 2)
-	if len(pair) != 2 {
-		return "", "", fmt.Errorf("invalid authorization header format")
-	}
-	return pair[0], pair[1], nil
-}
 
 func verifyPostmarkWebhookAndFindUser(db *sql.DB, headers http.Header) (int, int, error) {
 	authHeader := headers.Get("Authorization")
+	log.Printf("Auth Header: %s", authHeader) // Add this line
+
 	username, password, err := decodeBasicAuth(authHeader)
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to decode auth header: %v", err)
