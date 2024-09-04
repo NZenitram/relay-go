@@ -1,0 +1,85 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net/http"
+
+	"github.com/sendgrid/sendgrid-go/helpers/eventwebhook"
+)
+
+type SendgridWebhookPayload struct {
+	Headers map[string][]string `json:"headers"`
+	Body    json.RawMessage     `json:"body"`
+}
+
+func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Header) (int, error) {
+	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
+	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
+
+	rows, err := db.Query("SELECT user_id, sendgrid_verification_key FROM email_service_providers WHERE provider_name = 'sendgrid' AND sendgrid_verification_key IS NOT NULL")
+	if err != nil {
+		return 0, fmt.Errorf("failed to query database: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var userID int
+		var publicKey string
+		err := rows.Scan(&userID, &publicKey)
+		if err != nil {
+			return 0, fmt.Errorf("failed to scan row: %v", err)
+		}
+
+		ecdaKey, err := eventwebhook.ConvertPublicKeyBase64ToECDSA(publicKey)
+		if err != nil {
+			log.Printf("Cannot convert public kye for user ID %s: %v", err, userID)
+			continue
+		}
+
+		valid, err := eventwebhook.VerifySignature(ecdaKey, body, signature, timestamp)
+		if err != nil {
+			log.Printf("Signature verification failed for user ID %s: %v", err, userID)
+			continue
+		}
+
+		if valid {
+			return userID, nil
+		}
+	}
+
+	return 0, fmt.Errorf("no matching user found for the given webhook signature: %v", signature)
+}
+
+func associateSendgridEventWithUser(db *sql.DB, messageID string, userID int) error {
+	// Insert the association into the message_user_associations table
+	_, err := db.Exec(`
+        INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
+        VALUES ($1, $2, (SELECT esp_id FROM email_service_providers WHERE user_id = $2 AND provider_name = 'sendgrid'), 'sendgrid')
+        ON CONFLICT (message_id, provider) DO NOTHING
+    `, messageID, userID)
+	if err != nil {
+		return fmt.Errorf("failed to insert message association: %v", err)
+	}
+
+	return nil
+}
+
+type SendGridEventBody struct {
+	Email         string   `json:"email"`
+	Event         string   `json:"event"`
+	SGMessageID   string   `json:"sg_message_id"`
+	SGMachineOpen bool     `json:"sg_machine_open"`
+	Timestamp     int64    `json:"timestamp"`
+	Category      []string `json:"category"`
+	SGEventID     string   `json:"sg_event_id"`
+	SMTPID        string   `json:"smtp-id"`
+	BounceType    string   `json:"bounce_type,omitempty"`
+	Reason        string   `json:"reason,omitempty"`
+}
+
+type EventPayload struct {
+	Body []json.RawMessage `json:"body"`
+}

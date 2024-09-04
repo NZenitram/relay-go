@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"relay-go/m/database"
 
 	"github.com/IBM/sarama"
 	"github.com/joho/godotenv"
@@ -93,9 +94,41 @@ func main() {
 		}
 		defer r.Body.Close()
 
+		// Verify the webhook and find the associated user
+		database.InitDB()
+		db := database.GetDB()
+		userID, err := verifySendgridWebhookAndFindUser(db, body, r.Header)
+		if err != nil {
+			log.Printf("Failed to verify webhook: %v", err)
+			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+			return
+		}
+
 		message := Message{
 			Headers: r.Header,
 			Body:    body,
+		}
+
+		var events []json.RawMessage
+		err = json.Unmarshal(message.Body, &events)
+		if err != nil {
+			log.Printf("Failed to unmarshal message body: %v", err)
+			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
+			return
+		}
+
+		for _, eventData := range events {
+			var sgEventBody SendGridEventBody
+			err = json.Unmarshal(eventData, &sgEventBody)
+			if err != nil {
+				log.Printf("Failed to unmarshal SendGridEventBody: %v", err)
+				continue
+			}
+			err = associateSendgridEventWithUser(db, sgEventBody.SGMessageID, userID)
+			if err != nil {
+				log.Printf("Failed to associate event with user: %v", err)
+				// Decide whether to continue or return based on your error handling strategy
+			}
 		}
 
 		handleRequest(w, producer, webhookTopicSendGrid, message)
@@ -219,10 +252,10 @@ func validateEmailPayload(payload []byte) error {
 		return errors.New("unexpected SocketLabs Server ID without 'SocketLabsAPIkey'. Please provide both or none")
 	}
 
-	if emailPayload.Credentials["PostmarkServerToken"] == "" && emailPayload.Credentials["PostmarkAPIURL"] != "" {
+	if emailPayload.Credentials["PostmarkServerToken"] == "" && emailPayload.Credentials["PostmarkWeight"] != "" {
 		return errors.New("unexpected Postmark API URL without 'PostmarkServerToken'. Please provide both or none")
 	}
-	if emailPayload.Credentials["PostmarkServerToken"] != "" && emailPayload.Credentials["PostmarkAPIURL"] == "" {
+	if emailPayload.Credentials["PostmarkServerToken"] != "" && emailPayload.Credentials["PostmarkWeight"] == "" {
 		return errors.New("unexpected Postmark Server Token without 'PostmarkAPIURL'. Please provide both or none")
 	}
 
