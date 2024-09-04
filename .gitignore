@@ -26,3 +26,6 @@ go.work.sum
 
 # kafka data
 data/
+
+# docker db data
+postgres/
