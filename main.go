@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/IBM/sarama"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -66,6 +67,17 @@ func main() {
 
 	// Set up the HTTP server for emails
 	http.HandleFunc("/emails", func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		apiKey := extractAPIKey(authHeader)
+		database.InitDB()
+		db := database.GetDB()
+		user, err := validateAPIKey(db, apiKey)
+		if err != nil {
+			logInvalidAttempt(apiKey)
+			http.Error(w, "Invalid API key", http.StatusUnauthorized)
+			return
+		}
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
@@ -73,15 +85,24 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		// Validate the email payload
 		if err := validateEmailPayload(body); err != nil {
-			http.Error(w, err.Error(), http.StatusMethodNotAllowed)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		messageID := uuid.New().String()
+
+		// Store the email request
+		err = storeEmailRequest(db, user.ID, messageID)
+		if err != nil {
+			http.Error(w, "Failed to store email request", http.StatusInternalServerError)
 			return
 		}
 
 		message := Message{
-			Headers: r.Header,
-			Body:    body,
+			MessageID: messageID,
+			UserID:    user.ID,
+			Body:      body,
 		}
 
 		handleRequest(w, producer, emailTopic, message)
@@ -352,8 +373,10 @@ type Attachment struct {
 }
 
 type Message struct {
-	Headers map[string][]string `json:"headers"`
-	Body    json.RawMessage     `json:"body"`
+	MessageID string
+	UserID    int
+	Headers   map[string][]string `json:"headers"`
+	Body      json.RawMessage     `json:"body"`
 }
 
 func decodeBasicAuth(authHeader string) (username, password string, err error) {
@@ -369,4 +392,8 @@ func decodeBasicAuth(authHeader string) (username, password string, err error) {
 		return "", "", fmt.Errorf("invalid authorization header format")
 	}
 	return pair[0], pair[1], nil
+}
+
+func extractAPIKey(authHeader string) string {
+	return strings.TrimPrefix(authHeader, "Bearer ")
 }
