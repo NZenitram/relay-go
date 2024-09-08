@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/IBM/sarama"
+	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 )
 
@@ -66,6 +67,17 @@ func main() {
 
 	// Set up the HTTP server for emails
 	http.HandleFunc("/emails", func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		apiKey := extractAPIKey(authHeader)
+		database.InitDB()
+		db := database.GetDB()
+		user, err := validateAPIKey(db, apiKey)
+		if err != nil {
+			logInvalidAttempt(apiKey)
+			http.Error(w, "Invalid API key", http.StatusUnauthorized)
+			return
+		}
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
@@ -73,15 +85,24 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		// Validate the email payload
 		if err := validateEmailPayload(body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 
+		messageID := uuid.New().String()
+
+		// Store the email request
+		err = storeEmailRequest(db, user.ID, messageID)
+		if err != nil {
+			http.Error(w, "Failed to store email request", http.StatusInternalServerError)
+			return
+		}
+
 		message := Message{
-			Headers: r.Header,
-			Body:    body,
+			MessageID: messageID,
+			UserID:    user.ID,
+			Body:      body,
 		}
 
 		handleRequest(w, producer, emailTopic, message)
@@ -278,6 +299,35 @@ func handleRequest(w http.ResponseWriter, producer sarama.SyncProducer, topic st
 	w.Write([]byte(response))
 }
 
+type EmailAddress struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+type Personalization struct {
+	To            EmailAddress      `json:"to"`
+	Subject       string            `json:"subject"`
+	Substitutions map[string]string `json:"substitutions"`
+}
+
+type Content struct {
+	Type  string `json:"type"`
+	Value string `json:"value"`
+}
+
+type EmailPayload struct {
+	Personalizations []Personalization `json:"personalizations"`
+	From             EmailAddress      `json:"from"`
+	ReplyTo          *EmailAddress     `json:"reply_to,omitempty"`
+	Subject          string            `json:"subject"`
+	Content          []Content         `json:"content"`
+	Attachments      []Attachment      `json:"attachments"`
+	Headers          map[string]string `json:"headers"`
+	Categories       []string          `json:"categories"`
+	CustomArgs       map[string]string `json:"custom_args"`
+	Sections         map[string]string `json:"sections"`
+}
+
 func validateEmailPayload(payload []byte) error {
 	var emailPayload EmailPayload
 	if err := json.Unmarshal(payload, &emailPayload); err != nil {
@@ -285,55 +335,35 @@ func validateEmailPayload(payload []byte) error {
 	}
 
 	// Check required fields
-	if emailPayload.From == "" {
-		return errors.New("missing required field: from")
+	if emailPayload.From.Email == "" {
+		return errors.New("missing required field: from.email")
 	}
-	if len(emailPayload.To) == 0 {
-		return errors.New("missing required field: to")
+	if len(emailPayload.Personalizations) == 0 {
+		return errors.New("missing required field: personalizations")
 	}
-	if emailPayload.Subject == "" {
-		return errors.New("missing required field: subject")
+	for i, p := range emailPayload.Personalizations {
+		if p.To.Email == "" {
+			return fmt.Errorf("missing required field: personalizations[%d].to.email", i)
+		}
 	}
-	if emailPayload.TextBody == "" && emailPayload.HtmlBody == "" {
-		return errors.New("either textbody or htmlbody must be provided")
+	if len(emailPayload.Content) == 0 {
+		return errors.New("missing required field: content")
 	}
-	if emailPayload.Credentials == nil {
-		return errors.New("missing required field: credentials")
+	hasTextContent := false
+	hasHtmlContent := false
+	for _, c := range emailPayload.Content {
+		if c.Type == "text/plain" {
+			hasTextContent = true
+		}
+		if c.Type == "text/html" {
+			hasHtmlContent = true
+		}
 	}
-
-	// Check provider-specific credentials
-	if emailPayload.Credentials["SocketLabsServerID"] == "" && emailPayload.Credentials["SocketLabsAPIkey"] != "" {
-		return errors.New("unexpected SocketLabs API key without 'SocketLabsServerID'. Please provide both or none")
-	}
-	if emailPayload.Credentials["SocketLabsServerID"] != "" && emailPayload.Credentials["SocketLabsAPIkey"] == "" {
-		return errors.New("unexpected SocketLabs Server ID without 'SocketLabsAPIkey'. Please provide both or none")
-	}
-
-	if emailPayload.Credentials["PostmarkServerToken"] == "" && emailPayload.Credentials["PostmarkWeight"] != "" {
-		return errors.New("unexpected Postmark API URL without 'PostmarkServerToken'. Please provide both or none")
-	}
-	if emailPayload.Credentials["PostmarkServerToken"] != "" && emailPayload.Credentials["PostmarkWeight"] == "" {
-		return errors.New("unexpected Postmark Server Token without 'PostmarkAPIURL'. Please provide both or none")
+	if !hasTextContent && !hasHtmlContent {
+		return errors.New("either text/plain or text/html content must be provided")
 	}
 
-	if emailPayload.Credentials["SendGridAPIKey"] != "" {
-		return errors.New("unexpected SendGrid credentials. 'SendGridAPIKey' should not be provided")
-	}
 	return nil
-}
-
-type EmailPayload struct {
-	From        string                 `json:"from"`
-	To          []string               `json:"to"`
-	Cc          []string               `json:"cc"`
-	Bcc         []string               `json:"bcc"`
-	Subject     string                 `json:"subject"`
-	TextBody    string                 `json:"textbody"`
-	HtmlBody    string                 `json:"htmlbody"`
-	Attachments []Attachment           `json:"attachments"`
-	Headers     map[string]string      `json:"headers"`
-	Data        map[string]interface{} `json:"data"`
-	Credentials map[string]string      `json:"credentials"`
 }
 
 type Attachment struct {
@@ -343,8 +373,10 @@ type Attachment struct {
 }
 
 type Message struct {
-	Headers map[string][]string `json:"headers"`
-	Body    json.RawMessage     `json:"body"`
+	MessageID string
+	UserID    int
+	Headers   map[string][]string `json:"headers"`
+	Body      json.RawMessage     `json:"body"`
 }
 
 func decodeBasicAuth(authHeader string) (username, password string, err error) {
@@ -360,4 +392,8 @@ func decodeBasicAuth(authHeader string) (username, password string, err error) {
 		return "", "", fmt.Errorf("invalid authorization header format")
 	}
 	return pair[0], pair[1], nil
+}
+
+func extractAPIKey(authHeader string) string {
+	return strings.TrimPrefix(authHeader, "Bearer ")
 }
