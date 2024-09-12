@@ -58,6 +58,9 @@ func main() {
 		log.Fatal("HTTP_SERVER_PORT environment variable is not set")
 	}
 
+	database.InitDB()
+	db := database.GetDB()
+
 	// Set up the Kafka producer
 	producer, err := sarama.NewSyncProducer(kafkaBrokers, nil)
 	if err != nil {
@@ -69,23 +72,27 @@ func main() {
 	http.HandleFunc("/emails", func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		apiKey := extractAPIKey(authHeader)
-		database.InitDB()
-		db := database.GetDB()
-		user, err := validateAPIKey(db, apiKey)
-		if err != nil {
+
+		user, validateAPIKeyError := validateAPIKey(db, apiKey)
+		if validateAPIKeyError != nil {
 			logInvalidAttempt(apiKey)
 			http.Error(w, "Invalid API key", http.StatusUnauthorized)
 			return
 		}
 
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
+		body, httpReqReadErr := io.ReadAll(r.Body)
+		if httpReqReadErr != nil {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
 
-		if err := validateEmailPayload(body); err != nil {
+		var emailPayload EmailPayload
+		if emailPayloadJSONerr := json.Unmarshal(body, &emailPayload); emailPayloadJSONerr != nil {
+			fmt.Printf("invalid JSON: %v", emailPayloadJSONerr)
+		}
+
+		if err := validateEmailPayload(emailPayload); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -105,7 +112,14 @@ func main() {
 			Body:      body,
 		}
 
-		handleRequest(w, producer, emailTopic, message)
+		if emailPayload.CustomArgs["IsBatch"] == "true" {
+			err = handleBatchSend(db, message.UserID, emailPayload)
+			if err != nil {
+				fmt.Printf("failed to handle batch send: %v", err)
+			}
+		} else {
+			handleRequest(w, producer, emailTopic, message)
+		}
 	})
 
 	// Set up the HTTP server for webhooks
@@ -118,8 +132,7 @@ func main() {
 		defer r.Body.Close()
 
 		// Verify the webhook and find the associated user
-		database.InitDB()
-		db := database.GetDB()
+
 		userID, err := verifySendgridWebhookAndFindUser(db, body, r.Header)
 		if err != nil {
 			log.Printf("Sendgrid - Failed to verify webhook: %v", err)
@@ -166,8 +179,7 @@ func main() {
 		defer r.Body.Close()
 
 		// Verify the webhook and find the associated user
-		database.InitDB()
-		db := database.GetDB()
+
 		userID, espID, err := verifySparkPostWebhookAndFindUser(db, r.Header)
 		if err != nil {
 			log.Printf("Sparkpost - Failed to verify webhook: %v", err)
@@ -209,9 +221,6 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		// Verify the webhook and find the associated user
-		database.InitDB()
-		db := database.GetDB()
 		userID, espID, err := verifyPostmarkWebhookAndFindUser(db, r.Header)
 		if err != nil {
 			log.Printf("Postmark - Failed to verify webhook: %v", err)
@@ -299,41 +308,7 @@ func handleRequest(w http.ResponseWriter, producer sarama.SyncProducer, topic st
 	w.Write([]byte(response))
 }
 
-type EmailAddress struct {
-	Name  string `json:"name"`
-	Email string `json:"email"`
-}
-
-type Personalization struct {
-	To            EmailAddress      `json:"to"`
-	Subject       string            `json:"subject"`
-	Substitutions map[string]string `json:"substitutions"`
-}
-
-type Content struct {
-	Type  string `json:"type"`
-	Value string `json:"value"`
-}
-
-type EmailPayload struct {
-	Personalizations []Personalization `json:"personalizations"`
-	From             EmailAddress      `json:"from"`
-	ReplyTo          *EmailAddress     `json:"reply_to,omitempty"`
-	Subject          string            `json:"subject"`
-	Content          []Content         `json:"content"`
-	Attachments      []Attachment      `json:"attachments"`
-	Headers          map[string]string `json:"headers"`
-	Categories       []string          `json:"categories"`
-	CustomArgs       map[string]string `json:"custom_args"`
-	Sections         map[string]string `json:"sections"`
-}
-
-func validateEmailPayload(payload []byte) error {
-	var emailPayload EmailPayload
-	if err := json.Unmarshal(payload, &emailPayload); err != nil {
-		return fmt.Errorf("invalid JSON: %v", err)
-	}
-
+func validateEmailPayload(emailPayload EmailPayload) error {
 	// Check required fields
 	if emailPayload.From.Email == "" {
 		return errors.New("missing required field: from.email")
@@ -364,12 +339,6 @@ func validateEmailPayload(payload []byte) error {
 	}
 
 	return nil
-}
-
-type Attachment struct {
-	Name        string `json:"name"`
-	ContentType string `json:"contenttype"`
-	Content     string `json:"content"`
 }
 
 type Message struct {
