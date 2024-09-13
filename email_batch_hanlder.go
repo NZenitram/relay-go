@@ -189,12 +189,12 @@ func (bp *BatchProcessor) scheduleEmailSending(batchID int, schedule []int, batc
 func (bp *BatchProcessor) ProcessScheduledEmails() {
 	log.Println("Debug: Starting ProcessScheduledEmails")
 	for {
-		log.Println("Debug: Checking for due emails")
+		// log.Println("Debug: Checking for due emails")
 		// Check for due emails every minute
 		time.Sleep(1 * time.Minute)
 
 		now := time.Now().Unix()
-		log.Printf("Debug: Current timestamp: %d", now)
+		// log.Printf("Debug: Current timestamp: %d", now)
 
 		batchInfos, err := bp.redis.ZRangeByScore(bp.ctx, "scheduled_emails", &redis.ZRangeBy{
 			Min: "0",
@@ -206,7 +206,7 @@ func (bp *BatchProcessor) ProcessScheduledEmails() {
 			continue
 		}
 
-		log.Printf("Debug: Found %d due emails", len(batchInfos))
+		// log.Printf("Debug: Found %d due emails", len(batchInfos))
 
 		for i, batchInfoJSON := range batchInfos {
 			log.Printf("Debug: Processing batch info %d: %s", i, batchInfoJSON)
@@ -219,7 +219,7 @@ func (bp *BatchProcessor) ProcessScheduledEmails() {
 				continue
 			}
 
-			log.Printf("Debug: Retrieved actual batch info: %s", actualBatchInfo)
+			// log.Printf("Debug: Retrieved actual batch info: %s", actualBatchInfo)
 
 			var batchInfo struct {
 				BatchID    int `json:"batch_id"`
@@ -234,12 +234,12 @@ func (bp *BatchProcessor) ProcessScheduledEmails() {
 				continue
 			}
 
-			log.Printf("Debug: Unmarshaled batch info: %+v", batchInfo)
+			// log.Printf("Debug: Unmarshaled batch info: %+v", batchInfo)
 
-			log.Printf("Debug: Processing batch ID %d, size %d, index %d", batchInfo.BatchID, batchInfo.BatchSize, batchInfo.BatchIndex)
+			// log.Printf("Debug: Processing batch ID %d, size %d, index %d", batchInfo.BatchID, batchInfo.BatchSize, batchInfo.BatchIndex)
 			bp.processBatch(batchInfo.BatchID, batchInfo.BatchSize)
 
-			log.Printf("Debug: Removing processed batch from scheduled_emails")
+			// log.Printf("Debug: Removing processed batch from scheduled_emails")
 			removeResult, err := bp.redis.ZRem(bp.ctx, "scheduled_emails", jobKey).Result()
 			if err != nil {
 				log.Printf("Error: Failed to remove processed batch from scheduled_emails: %v", err)
@@ -313,7 +313,7 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 	}
 	sort.Strings(pKeys)
 
-	log.Printf("Debug: Found %d personalization keys for batch %d", len(pKeys), batchID)
+	// log.Printf("Debug: Found %d personalization keys for batch %d", len(pKeys), batchID)
 
 	// Calculate start and end indices for this batch
 	// startIndex := currentBatchIndex * batchSize
@@ -325,7 +325,7 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 	// Process personalizations for this batch
 	for i := 0; i < numLoops; i++ {
 		personalizationKey := pKeys[i]
-		log.Printf("Debug: Processing key %s for batch %d", personalizationKey, batchID)
+		// log.Printf("Debug: Processing key %s for batch %d", personalizationKey, batchID)
 
 		personalizationJSON, err := bp.redis.HGet(bp.ctx, batchKey, personalizationKey).Result()
 		if err != nil {
@@ -368,8 +368,18 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 		bp.redis.HDel(bp.ctx, batchKey, personalizationKey)
 	}
 
-	// Update the current batch index
 	newBatchIndex := currentBatchIndex + 1
+
+	// Update the database after processing all due emails in this loop
+	_, err = bp.db.ExecContext(bp.ctx, `
+        UPDATE email_batches 
+        	SET current_batch = $1, 
+            updated_at = CURRENT_TIMESTAMP 
+       		WHERE batch_id = $2`, newBatchIndex, batchID)
+	if err != nil {
+		log.Printf("Failed to update processed_emails for batch %d: %v", batchID, err)
+	}
+	// Update the current batch index
 	err = bp.redis.HSet(bp.ctx, batchKey, "current_batch_index", newBatchIndex).Err()
 	if err != nil {
 		log.Printf("Failed to update current batch index for batch %d: %v", batchID, err)
@@ -377,12 +387,21 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 
 	// Check if this was the last batch
 	if numLoops == len(pKeys) {
+		// Update batch status to completed
+		_, err = bp.db.ExecContext(bp.ctx, `
+		UPDATE email_batches 
+			SET status = 'completed', 
+			updated_at = CURRENT_TIMESTAMP 
+			WHERE batch_id = $1`, batchID)
+		if err != nil {
+			log.Printf("Failed to update batch status to completed for batch %d: %v", batchID, err)
+		}
 		// This was the last batch, clean up Redis
 		bp.redis.Del(bp.ctx, batchKey)
 		log.Printf("Batch %d completed and cleaned up", batchID)
 	}
 
-	log.Printf("Debug: Finished processing batch %d", batchID)
+	// log.Printf("Debug: Finished processing batch %d", batchID)
 }
 
 func calculateBatchSchedule(totalPersonalizations, batchSize, batchIntervalSeconds int) []int {
