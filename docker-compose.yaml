@@ -132,8 +132,32 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-
+  redis:
+    image: redis:6.2-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      -  ~/personal/project_data/relay-go/redis:/data
+    command: redis-server --save 20 1 --loglevel warning --requirepass ${REDIS_PASSWORD}
+    networks:
+      - kafka-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+  redis-insights:
+    image: redislabs/redisinsight:latest
+    container_name: redis-insights
+    ports:
+      - "5540:5540"
+    volumes:
+      - ~/personal/project_data/relay-go/redis-insights:/db
+    depends_on:
+      - redis
+    networks:
+      - kafka-net
 volumes:
   postgres_data:
     driver: local
