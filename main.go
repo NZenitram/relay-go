@@ -17,11 +17,44 @@ import (
 	"github.com/joho/godotenv"
 )
 
-func main() {
-	err := godotenv.Load()
-	if err != nil {
+var batchProcessor *BatchProcessor
+
+func init() {
+	envErr := godotenv.Load()
+	if envErr != nil {
 		log.Println("No .env file found, using system environment variables")
 	}
+
+	redisAddr := os.Getenv("REDIS_HOST")
+	if redisAddr == "" {
+		log.Fatal("REDIS_HOST environment variable is not set")
+	}
+
+	redisPass := os.Getenv("REDIS_PASSWORD")
+	if redisAddr == "" {
+		log.Fatal("REDIS_HOST environment variable is not set")
+	}
+
+	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
+	if len(kafkaBrokers) == 0 {
+		log.Fatal("KAFKA_BROKERS environment variable is not set")
+	}
+
+	database.InitDB()
+	db := database.GetDB()
+	// Initialize your database connection, Redis address, and Kafka brokers
+
+	var err error
+	batchProcessor, err = NewBatchProcessor(db, redisAddr, redisPass, kafkaBrokers)
+	if err != nil {
+		log.Fatalf("Failed to create batch processor: %v", err)
+	}
+
+	// Start processing scheduled emails in a separate goroutine
+	go batchProcessor.ProcessScheduledEmails()
+}
+
+func main() {
 
 	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
 	if len(kafkaBrokers) == 0 {
@@ -69,6 +102,7 @@ func main() {
 	defer producer.Close()
 
 	// Set up the HTTP server for emails
+
 	http.HandleFunc("/emails", func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		apiKey := extractAPIKey(authHeader)
@@ -89,7 +123,8 @@ func main() {
 
 		var emailPayload EmailPayload
 		if emailPayloadJSONerr := json.Unmarshal(body, &emailPayload); emailPayloadJSONerr != nil {
-			fmt.Printf("invalid JSON: %v", emailPayloadJSONerr)
+			http.Error(w, fmt.Sprintf("Invalid JSON: %v", emailPayloadJSONerr), http.StatusBadRequest)
+			return
 		}
 
 		if err := validateEmailPayload(emailPayload); err != nil {
@@ -100,7 +135,7 @@ func main() {
 		messageID := uuid.New().String()
 
 		// Store the email request
-		err = storeEmailRequest(db, user.ID, messageID)
+		err := storeEmailRequest(db, user.ID, messageID)
 		if err != nil {
 			http.Error(w, "Failed to store email request", http.StatusInternalServerError)
 			return
@@ -113,10 +148,13 @@ func main() {
 		}
 
 		if emailPayload.CustomArgs["IsBatch"] == "true" {
-			err = handleBatchSend(db, message.UserID, emailPayload)
+			err := batchProcessor.HandleBatchSend(user.ID, message)
 			if err != nil {
-				fmt.Printf("failed to handle batch send: %v", err)
+				http.Error(w, fmt.Sprintf("Failed to handle batch send: %v", err), http.StatusInternalServerError)
+				return
 			}
+			w.WriteHeader(http.StatusAccepted)
+			w.Write([]byte(fmt.Sprintf(`{"message": "Batch email processing started", "batch_id": %v}`, messageID)))
 		} else {
 			handleRequest(w, producer, emailTopic, message)
 		}
