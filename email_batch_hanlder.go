@@ -394,7 +394,8 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 		_, err = bp.db.ExecContext(bp.ctx, `
 		UPDATE email_batches 
 			SET status = 'completed', 
-			updated_at = CURRENT_TIMESTAMP 
+			updated_at = CURRENT_TIMESTAMP, 
+			end_time = CURRENT_TIMESTAMP
 			WHERE batch_id = $1`, batchID)
 		if err != nil {
 			log.Printf("Failed to update batch status to completed for batch %d: %v", batchID, err)
