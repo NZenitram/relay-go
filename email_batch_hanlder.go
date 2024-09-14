@@ -323,6 +323,9 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 	}
 
 	// Process personalizations for this batch
+	var emptyPersonalization []Personalization
+	emailPayload.Personalizations = emptyPersonalization
+
 	for i := 0; i < numLoops; i++ {
 		personalizationKey := pKeys[i]
 		// log.Printf("Debug: Processing key %s for batch %d", personalizationKey, batchID)
@@ -340,32 +343,32 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 			continue
 		}
 
-		emailPayload.Personalizations = []Personalization{personalization}
-
-		kafkaMessage := kafkaPayload{
-			MessageID: messageID,
-			UserID:    userID,
-			Body:      emailPayload,
-		}
-
-		// Send to Kafka for processing
-		emailPayloadJSON, err := json.Marshal(kafkaMessage)
-		if err != nil {
-			log.Printf("Failed to marshal email payload for batch %d, key %s: %v", batchID, personalizationKey, err)
-			continue
-		}
-
-		_, _, err = bp.kafka.SendMessage(&sarama.ProducerMessage{
-			Topic: "emails",
-			Key:   sarama.StringEncoder(fmt.Sprintf("%d", batchID)),
-			Value: sarama.StringEncoder(emailPayloadJSON),
-		})
-		if err != nil {
-			log.Printf("Failed to send message to Kafka for batch %d, key %s: %v", batchID, personalizationKey, err)
-		}
+		emailPayload.Personalizations = append(emailPayload.Personalizations, personalization)
+		// emailPayload.Personalizations = []Personalization{personalization}
 
 		// Remove processed personalization from Redis
 		bp.redis.HDel(bp.ctx, batchKey, personalizationKey)
+	}
+
+	kafkaMessage := kafkaPayload{
+		MessageID: messageID,
+		UserID:    userID,
+		Body:      emailPayload,
+	}
+
+	// Send to Kafka for processing
+	emailPayloadJSON, err := json.Marshal(kafkaMessage)
+	if err != nil {
+		log.Printf("Failed to marshal email payload for batch %d, key %s: %v", batchID, err)
+	}
+
+	_, _, err = bp.kafka.SendMessage(&sarama.ProducerMessage{
+		Topic: "emails",
+		Key:   sarama.StringEncoder(fmt.Sprintf("%d", batchID)),
+		Value: sarama.StringEncoder(emailPayloadJSON),
+	})
+	if err != nil {
+		log.Printf("Failed to send message to Kafka for batch %d, key %s: %v", batchID, err)
 	}
 
 	newBatchIndex := currentBatchIndex + 1
