@@ -18,7 +18,7 @@ This separation of ingress and consumer allows for better scalability, fault tol
 
 ## Prerequisites
 
-- Go 1.16 or higher
+- Go 1.20 or higher
 - Redis server
 - Kafka cluster
 - PostgreSQL database
