@@ -1,5 +1,3 @@
-Thank you for providing both code snippets. I'll now create a comprehensive README that covers the functionality and setup of this email processing system. Here's the README:
-
 ```markdown
 # Email Processing System
 
