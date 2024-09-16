@@ -103,6 +103,171 @@ The system includes error handling for various scenarios, including:
 
 Errors are logged and appropriate HTTP status codes are returned to the client.
 
+Certainly! I'll rewrite the README section, omitting the email domains in the examples. Here's the revised version:
+
+## Usage
+
+### Sending Emails
+
+The system accepts two types of payload formats for email sending: HandleBars and Hyphens. Send a POST request to `/emails` with the appropriate JSON payload.
+
+Include the API key in the Authorization header:
+
+```
+Authorization: Bearer your_api_key
+```
+
+#### HandleBars Format
+
+Use this format when your email content uses HandleBars-style placeholders (e.g., `{{name}}`).
+
+Example payload:
+
+```json
+{
+  "from": {
+    "name": "Batch Testing",
+    "email": "batch@example.com"
+  },
+  "personalizations": [
+    {
+      "to": {
+        "name": "Nick Martinez, Jr.",
+        "email": "nick@example.com"
+      },
+      "subject": "Personalized Email for Nick",
+      "substitutions": {
+        "name": "Nick",
+        "email": "nick@example.com",
+        "order_id": "12345",
+        "confirmations": "confirmation_001",
+        "customer_since": "2020-01-01",
+        "loyalty_level": "Gold",
+        "product_recommendation": "premium_plan"
+      }
+    }
+  ],
+  "subject": "Default Subject (if no personalization)",
+  "content": [
+    {
+      "type": "text/plain",
+      "value": "Hello {{name}},\n {{confirmations}}\n Customer since: {{customer_since}}\n Loyalty Level: {{loyalty_level}}\n {{product_recommendation}}"
+    },
+    {
+      "type": "text/html",
+      "value": "<html><body><h1>Welcome, {{name}}!</h1><p>{{confirmations}}</p></body></html>"
+    }
+  ],
+  "sections": {
+    "confirmation_001": "Thanks for choosing our service. This email is to confirm that we have processed your order {{order_id}}."
+  },
+  "attachments": [
+    {
+      "filename": "example.txt",
+      "type": "text/plain",
+      "content": "SGVsbG8gd29ybGQh",
+      "content_id": "ii_139db99fdb5c3704",
+      "disposition": "attachment"
+    }
+  ],
+  "headers": {
+    "X-Custom-Header-1": "Custom Value 1"
+  },
+  "custom_args": {
+    "TrackOpens": "true",
+    "TrackLinks": "HtmlOnly",
+    "MessageStream": "outbound",
+    "IsBatch": "true",
+    "BatchSize": "1",
+    "BatchInterval": "60"
+  },
+  "categories": ["test", "example"]
+}
+```
+
+#### Hyphens Format
+
+Use this format when your email content uses hyphen-style placeholders (e.g., `-name-`).
+
+Example payload:
+
+```json
+{
+  "from": {
+    "name": "Email Service",
+    "email": "admin@example.com"
+  },
+  "personalizations": [
+    {
+      "to": {
+        "name": "Jane Doe",
+        "email": "jane@example.com"
+      },
+      "subject": "Personalized Email for Jane",
+      "substitutions": {
+        "name": "Jane",
+        "email": "jane@example.com",
+        "order_id": "67890",
+        "confirmations": "confirmation_002",
+        "customer_since": "2021-06-15",
+        "loyalty_level": "Silver",
+        "product_recommendation": "standard_plan"
+      }
+    }
+  ],
+  "subject": "Default Subject (if no personalization)",
+  "content": [
+    {
+      "type": "text/plain",
+      "value": "Hello -name-,\n -confirmations-\n Customer since: -customer_since-\n Loyalty Level: -loyalty_level-\n -product_recommendation-"
+    },
+    {
+      "type": "text/html",
+      "value": "<html><body><h1>Welcome, -name-!</h1><p>-confirmations-</p></body></html>"
+    }
+  ],
+  "sections": {
+    "confirmation_002": "Thanks for your order. We've processed your order -order_id-. You can download your invoice as a PDF for your records."
+  },
+  "attachments": [
+    {
+      "filename": "example.txt",
+      "type": "text/plain",
+      "content": "SGVsbG8gd29ybGQh",
+      "content_id": "ii_139db99fdb5c3704",
+      "disposition": "attachment"
+    }
+  ],
+  "headers": {
+    "X-Custom-Header-1": "Custom Value 1"
+  },
+  "custom_args": {
+    "TrackOpens": "true",
+    "TrackLinks": "HtmlOnly",
+    "MessageStream": "outbound",
+    "IsBatch": "true",
+    "BatchSize": "1",
+    "BatchInterval": "60"
+  },
+  "categories": ["test", "example"]
+}
+```
+
+### Batch Processing
+
+To enable batch processing, set the `IsBatch` custom argument to "true" in your payload. You can also specify the `BatchSize` and `BatchInterval` (in seconds) in the `custom_args` section.
+
+### Webhook Endpoints
+
+The system provides webhook endpoints for various ESPs:
+
+- SendGrid: `/webhook-events/sendgrid`
+- SparkPost: `/webhook-events/sparkpost`
+- Postmark: `/webhook-events/postmark`
+- SocketLabs: `/webhook-events/socketlabs`
+
+Configure your ESP accounts to send webhook events to these endpoints.
+
 ## Security
 
 - API key authentication is required for sending emails
