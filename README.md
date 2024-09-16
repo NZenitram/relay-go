@@ -288,6 +288,3 @@ To add support for a new ESP:
 Contributions are welcome! Please submit a pull request or create an issue for any features or bug fixes.
 
 ## License
-
-
-This README provides an overview of the email processing system, including its features, setup instructions, usage guidelines, and architectural details. You may want to customize it further based on any additional functionality or specific requirements of your project.
