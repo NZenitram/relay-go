@@ -83,6 +83,7 @@ type BatchInfo struct {
 }
 
 type kafkaPayload struct {
+	BatchID   int
 	MessageID string
 	UserID    int
 	Body      EmailPayload

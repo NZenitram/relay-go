@@ -316,7 +316,6 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 	// log.Printf("Debug: Found %d personalization keys for batch %d", len(pKeys), batchID)
 
 	// Calculate start and end indices for this batch
-	// startIndex := currentBatchIndex * batchSize
 	numLoops := batchSize
 	if len(pKeys) < numLoops {
 		numLoops = len(pKeys)
@@ -344,13 +343,13 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 		}
 
 		emailPayload.Personalizations = append(emailPayload.Personalizations, personalization)
-		// emailPayload.Personalizations = []Personalization{personalization}
 
 		// Remove processed personalization from Redis
 		bp.redis.HDel(bp.ctx, batchKey, personalizationKey)
 	}
 
 	kafkaMessage := kafkaPayload{
+		BatchID:   batchID,
 		MessageID: messageID,
 		UserID:    userID,
 		Body:      emailPayload,
@@ -376,7 +375,7 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 	// Update the database after processing all due emails in this loop
 	_, err = bp.db.ExecContext(bp.ctx, `
         UPDATE email_batches 
-        	SET current_batch = $1, 
+        	SET batches_to_kafka = $1, 
             updated_at = CURRENT_TIMESTAMP 
        		WHERE batch_id = $2`, newBatchIndex, batchID)
 	if err != nil {
@@ -391,14 +390,14 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 	// Check if this was the last batch
 	if numLoops == len(pKeys) {
 		// Update batch status to completed
-		_, err = bp.db.ExecContext(bp.ctx, `
-		UPDATE email_batches 
-			SET status = 'completed', 
-			updated_at = CURRENT_TIMESTAMP
-			WHERE batch_id = $1`, batchID)
-		if err != nil {
-			log.Printf("Failed to update batch status to completed for batch %d: %v", batchID, err)
-		}
+		// _, err = bp.db.ExecContext(bp.ctx, `
+		// UPDATE email_batches
+		// 	SET status = 'completed',
+		// 	updated_at = CURRENT_TIMESTAMP
+		// 	WHERE batch_id = $1`, batchID)
+		// if err != nil {
+		// 	log.Printf("Failed to update batch status to completed for batch %d: %v", batchID, err)
+		// }
 		// This was the last batch, clean up Redis
 		bp.redis.Del(bp.ctx, batchKey)
 		log.Printf("Batch %d completed and cleaned up", batchID)
