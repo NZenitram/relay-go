@@ -281,6 +281,50 @@ To add support for a new ESP:
 3. Add a new webhook topic in the configuration
 4. Update the main function to include the new webhook endpoint
 
+## Development Environment
+
+Our development environment is containerized using Docker Compose, which allows for easy setup and consistent development across different machines. The environment consists of several services:
+
+1. Kafka: Message broker for handling email and webhook event queues.
+2. Kafka UI: Web interface for monitoring and managing Kafka.
+3. Relay-Go: Our main application for processing emails and webhook events.
+4. Relay-ESP: Service for interacting with Email Service Providers.
+5. PostgreSQL: Database for storing application data.
+6. Redis: In-memory data structure store used for caching and message queuing.
+7. Redis Insights: Web-based GUI for monitoring and managing Redis.
+8. Nginx: Web server used as a reverse proxy.
+9. Ngrok: Secure tunneling service for exposing local servers to the internet.
+
+### Proxy Setup with Nginx and Ngrok
+
+We use Nginx and Ngrok in our development environment for the following reasons:
+
+1. Nginx as a Reverse Proxy:
+   - Load Balancing: Nginx can distribute incoming requests across multiple application instances.
+   - SSL Termination: Handles HTTPS connections, offloading this task from our application servers.
+   - Caching: Can cache responses, reducing load on our application servers.
+   - Security: Acts as an additional layer of security, hiding our internal network structure.
+
+2. Ngrok for External Access:
+   - Secure Tunneling: Allows us to expose our local development environment to the internet securely.
+   - Testing Webhooks: Enables testing of webhook integrations without deploying to a public server.
+   - Collaboration: Facilitates sharing of local development instances with team members or clients.
+   - Bypassing Firewalls: Useful when developing behind restrictive firewalls or NATs.
+
+This setup allows us to develop and test our application in an environment that closely mimics production, including the ability to receive webhooks from external services. It also provides flexibility in routing requests and securing our application endpoints.
+
+To use this development environment:
+
+1. Ensure Docker and Docker Compose are installed on your system.
+2. Set up the required environment variables in a `.env` file.
+3. Run `docker-compose up` to start all services.
+4. Access the Kafka UI at `http://localhost:8080` for monitoring Kafka.
+5. Access Redis Insights at `http://localhost:5540` for monitoring Redis.
+6. The main application will be available through Ngrok, with the URL displayed in the Ngrok logs.
+
+Note: Make sure to never expose sensitive information or production data through Ngrok in a public development environment.
+
+
 ## Contributing
 
 Contributions are welcome! Please submit a pull request or create an issue for any features or bug fixes.
