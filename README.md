@@ -1,6 +1,10 @@
 # Email Processing System
 
-This is a Go-based email processing system that handles batch email sending, webhook events from various Email Service Providers (ESPs), and integrates with Kafka for message queuing. The system is designed to be scalable and flexible, supporting multiple ESPs and providing a unified interface for email sending and event processing.
+This is a Go-based email processing system that serves as the ingress point for handling batch email sending requests and webhook events from various Email Service Providers (ESPs). It integrates with Kafka for message queuing, preparing data for the consumer side of the system. 
+
+The ingress system is designed to be scalable and flexible, supporting multiple ESPs and providing a unified interface for email sending requests and event processing. It works in tandem with a separate consumer component, called go-relay-consumer, which ingests the Kafka topics populated by this ingress system and handles the actual sending of emails.
+
+This separation of ingress and consumer allows for better scalability, fault tolerance, and the ability to process large volumes of email requests asynchronously. The ingress system focuses on receiving and validating requests, while the consumer handles the email delivery logic and interactions with ESPs.
 
 ## Features
 
