@@ -103,8 +103,6 @@ The system includes error handling for various scenarios, including:
 
 Errors are logged and appropriate HTTP status codes are returned to the client.
 
-Certainly! I'll rewrite the README section, omitting the email domains in the examples. Here's the revised version:
-
 ## Usage
 
 ### Sending Emails
