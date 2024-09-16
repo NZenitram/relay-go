@@ -1,4 +1,3 @@
-```markdown
 # Email Processing System
 
 This is a Go-based email processing system that handles batch email sending, webhook events from various Email Service Providers (ESPs), and integrates with Kafka for message queuing. The system is designed to be scalable and flexible, supporting multiple ESPs and providing a unified interface for email sending and event processing.
@@ -125,7 +124,5 @@ Contributions are welcome! Please submit a pull request or create an issue for a
 
 ## License
 
-
-```
 
 This README provides an overview of the email processing system, including its features, setup instructions, usage guidelines, and architectural details. You may want to customize it further based on any additional functionality or specific requirements of your project.
