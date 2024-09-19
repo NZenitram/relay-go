@@ -128,7 +128,6 @@ services:
       - "5432:5432"
     volumes:
       - ~/personal/project_data/relay-go/postgres:/var/lib/postgresql/data
-      # - ./config/pg_hba.conf:/var/lib/postgresql/data/pg_hba.conf
     networks:
       - kafka-net
     healthcheck:
@@ -162,10 +161,32 @@ services:
       - redis
     networks:
       - kafka-net
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - kafka-net
+    volumes:
+      - ~/personal/project_data/relay-go/grafana:/var/lib/grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - postgres
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 volumes:
   postgres_data:
     driver: local
-
+  grafana_data:
+    driver: local
+    
 networks:
   kafka-net:
     driver: bridge
