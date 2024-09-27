@@ -9,7 +9,7 @@ This separation of ingress and consumer allows for better scalability, fault tol
 ## Features
 
 - Batch email processing
-- Real-time email sending
+- Real-time email sending via ESP API
 - Webhook handling for multiple ESPs (SendGrid, SparkPost, Postmark, SocketLabs)
 - Kafka integration for message queuing
 - API key authentication

@@ -57,7 +57,7 @@ services:
       WEBHOOK_TOPIC_SOCKETLABS: webhook-events-socketlabs
       WEBHOOK_TOPIC_SPARKPOST: webhook-events-sparkpost
       HTTP_SERVER_PORT: 8888
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: host.docker.internal
       POSTGRES_PORT: 5432
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -89,7 +89,7 @@ services:
       kafka:
         condition: service_healthy
     environment:
-      POSTGRES_HOST: postgres
+      POSTGRES_HOST: host.docker.internal
       POSTGRES_PORT: 5432
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -116,25 +116,26 @@ services:
       - relay-esp
     networks:
       - kafka-net
-  postgres:
-    image: postgres:14
-    container_name: postgres
-    restart: always
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - ~/personal/project_data/relay-go/postgres:/var/lib/postgresql/data
-    networks:
-      - kafka-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  # postgres:
+  #   image: timescale/timescaledb:latest-pg14
+  #   container_name: postgres
+  #   restart: always
+  #   environment:
+  #     - POSTGRES_USER=${POSTGRES_USER}
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+  #     - POSTGRES_DB=${POSTGRES_DB}
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - ~/personal/project_data/relay-go/postgres:/var/lib/postgresql/data
+  #     - ./config/postgressql.conf:/var/lib/postgresql/data/postgresql.conf
+  #   networks:
+  #     - kafka-net
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
   redis:
     image: redis:6.2-alpine
     container_name: redis
@@ -174,16 +175,28 @@ services:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_USERS_ALLOW_SIGN_UP=false
-    depends_on:
-      - postgres
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]
       interval: 10s
       timeout: 5s
       retries: 3
+  realtime-seeder:
+    image: relay-go-consumer-seeder:latest
+    container_name: realtime-seeder
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      POSTGRES_HOST: host.docker.internal
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    command: ["./relay-go-consumer", "--realtime-seed"]
+    networks:
+      - kafka-net
+ 
 volumes:
-  postgres_data:
-    driver: local
   grafana_data:
     driver: local
     
