@@ -9,7 +9,7 @@ import (
 
 func verifyPostmarkWebhookAndFindUser(db *sql.DB, headers http.Header) (int, int, error) {
 	authHeader := headers.Get("Authorization")
-	log.Printf("Auth Header: %s", authHeader) // Add this line
+	log.Printf("Auth Header: %s", authHeader)
 
 	username, password, err := decodeBasicAuth(authHeader)
 	if err != nil {
@@ -21,8 +21,8 @@ func verifyPostmarkWebhookAndFindUser(db *sql.DB, headers http.Header) (int, int
         SELECT user_id, esp_id 
         FROM email_service_providers 
         WHERE provider_name = 'postmark' 
-        AND postmark_webhook_user = $1 
-        AND postmark_webhook_password = $2
+        AND postmark_webhook_user = ? 
+        AND postmark_webhook_password = ?
     `, username, password).Scan(&userID, &espID)
 
 	if err != nil {
