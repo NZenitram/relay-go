@@ -41,101 +41,101 @@ services:
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
     depends_on:
       - kafka
-  relay-go:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: relay-go
-    depends_on:
-      kafka:
-        condition: service_healthy
-    environment:
-      KAFKA_BROKERS: kafka:9092
-      EMAIL_TOPIC: emails
-      WEBHOOK_TOPIC_SENDGRID: webhook-events-sendgrid
-      WEBHOOK_TOPIC_POSTMARK: webhook-events-postmark
-      WEBHOOK_TOPIC_SOCKETLABS: webhook-events-socketlabs
-      WEBHOOK_TOPIC_SPARKPOST: webhook-events-sparkpost
-      HTTP_SERVER_PORT: 8888
-      POSTGRES_HOST: host.docker.internal
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-      REDIS_HOST: redis:6379
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
-    ports:
-      - "8888:8888"
-    networks:
-      - kafka-net
-  ngrok:
-    image: ngrok/ngrok:latest
-    container_name: ngrok
-    command: 
-      http --domain=${NGROK_PUBLIC_URL} nginx:80
-    environment:
-      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
-    ports:
-      - "4040:4040"  # NGROK web interface
-    depends_on:
-      - kafka
-      # - nginx
-    networks:
-      - kafka-net
-  relay-esp:
-    image: relay-esp:latest  # Replace with your actual image name and tag
-    container_name: relay-esp
-    depends_on:
-      kafka:
-        condition: service_healthy
-    environment:
-      POSTGRES_HOST: host.docker.internal
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-      SENDGRID_API_KEY:
-    ports:
-      - "8081:8081"
-    networks:
-      - kafka-net
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-  nginx:
-    image: nginx:latest
-    container_name: nginx-proxy
-    ports:
-      - "80:80"
-    volumes:
-      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
-    depends_on:
-      # - relay-go
-      - relay-esp
-    networks:
-      - kafka-net
-  postgres:
-    image: timescale/timescaledb:latest-pg14
-    container_name: postgres
-    restart: always
-    environment:
-      - POSTGRES_USER=${POSTGRES_USER}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
-    ports:
-      - "5432:5432"
-    volumes:
-      - ~/personal/project_data/relay-go/postgres:/var/lib/postgresql/data
-      - ./config/postgressql.conf:/var/lib/postgresql/data/postgresql.conf
-    networks:
-      - kafka-net
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+  # relay-go:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: relay-go
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #   environment:
+  #     KAFKA_BROKERS: kafka:9092
+  #     EMAIL_TOPIC: emails
+  #     WEBHOOK_TOPIC_SENDGRID: webhook-events-sendgrid
+  #     WEBHOOK_TOPIC_POSTMARK: webhook-events-postmark
+  #     WEBHOOK_TOPIC_SOCKETLABS: webhook-events-socketlabs
+  #     WEBHOOK_TOPIC_SPARKPOST: webhook-events-sparkpost
+  #     HTTP_SERVER_PORT: 8888
+  #     POSTGRES_HOST: host.docker.internal
+  #     POSTGRES_PORT: 5432
+  #     POSTGRES_USER: ${POSTGRES_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_DB: ${POSTGRES_DB}
+  #     REDIS_HOST: redis:6379
+  #     REDIS_PASSWORD: ${REDIS_PASSWORD}
+  #   ports:
+  #     - "8888:8888"
+  #   networks:
+  #     - kafka-net
+  # ngrok:
+  #   image: ngrok/ngrok:latest
+  #   container_name: ngrok
+  #   command: 
+  #     http --domain=${NGROK_PUBLIC_URL} nginx:80
+  #   environment:
+  #     NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+  #   ports:
+  #     - "4040:4040"  # NGROK web interface
+  #   depends_on:
+  #     - kafka
+  #     # - nginx
+  #   networks:
+  #     - kafka-net
+  # relay-esp:
+  #   image: relay-esp:latest  # Replace with your actual image name and tag
+  #   container_name: relay-esp
+  #   depends_on:
+  #     kafka:
+  #       condition: service_healthy
+  #   environment:
+  #     POSTGRES_HOST: host.docker.internal
+  #     POSTGRES_PORT: 5432
+  #     POSTGRES_USER: ${POSTGRES_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_DB: ${POSTGRES_DB}
+  #     SENDGRID_API_KEY: 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
+  #   ports:
+  #     - "8081:8081"
+  #   networks:
+  #     - kafka-net
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 3
+  # nginx:
+  #   image: nginx:latest
+  #   container_name: nginx-proxy
+  #   ports:
+  #     - "80:80"
+  #   volumes:
+  #     - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+  #   depends_on:
+  #     # - relay-go
+  #     - relay-esp
+  #   networks:
+  #     - kafka-net
+  # postgres:
+  #   image: timescale/timescaledb:latest-pg14
+  #   container_name: postgres
+  #   restart: always
+  #   environment:
+  #     - POSTGRES_USER=${POSTGRES_USER}
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+  #     - POSTGRES_DB=${POSTGRES_DB}
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - ~/personal/project_data/relay-go/postgres:/var/lib/postgresql/data
+  #     - ./config/postgressql.conf:/var/lib/postgresql/data/postgresql.conf
+  #   networks:
+  #     - kafka-net
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
   redis:
     image: redis:6.2-alpine
     container_name: redis
@@ -182,19 +182,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 3
-  realtime-seeder:
-    image: relay-go-consumer-seeder:latest
-    container_name: realtime-seeder
-    environment:
-      KAFKA_BROKERS: kafka:9092
-      POSTGRES_HOST: host.docker.internal
-      POSTGRES_PORT: 5432
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    command: ["./relay-go-consumer", "--realtime-seed"]
-    networks:
-      - kafka-net
+  # realtime-seeder:
+  #   image: relay-go-consumer-seeder:latest
+  #   container_name: realtime-seeder
+  #   environment:
+  #     KAFKA_BROKERS: kafka:9092
+  #     POSTGRES_HOST: host.docker.internal
+  #     POSTGRES_PORT: 5432
+  #     POSTGRES_USER: ${POSTGRES_USER}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #     POSTGRES_DB: ${POSTGRES_DB}
+  #   command: ["./relay-go-consumer", "--realtime-seed"]
+  #   networks:
+  #     - kafka-net
  
 volumes:
   grafana_data:

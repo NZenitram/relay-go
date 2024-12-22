@@ -334,3 +334,9 @@ Note: Make sure to never expose sensitive information or production data through
 Contributions are welcome! Please submit a pull request or create an issue for any features or bug fixes.
 
 ## License
+
+### Uploading to ECR
+
+aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 257394459269.dkr.ecr.us-east-2.amazonaws.com
+docker tag relay-go:latest 257394459269.dkr.ecr.us-east-2.amazonaws.com/sh-consulting/relay-go:latest
+docker push 257394459269.dkr.ecr.us-east-2.amazonaws.com/sh-consulting/relay-go:latest

@@ -53,13 +53,13 @@ func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Head
 	return 0, fmt.Errorf("no matching user found for the given webhook signature: %v", signature)
 }
 
-func associateSendgridEventWithUser(db *sql.DB, messageID string, userID int) error {
+func associateSendgridEventWithUser(db *sql.DB, sgEventBody SendGridEventBody, userID int) error {
 	// Insert the association into the message_user_associations table
 	_, err := db.Exec(`
         INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
         VALUES ($1, $2, (SELECT esp_id FROM email_service_providers WHERE user_id = $2 AND provider_name = 'sendgrid'), 'sendgrid')
         ON CONFLICT (message_id, provider) DO NOTHING
-    `, messageID, userID)
+    `, sgEventBody.SGMessageID, userID)
 	if err != nil {
 		return fmt.Errorf("failed to insert message association: %v", err)
 	}
@@ -69,6 +69,7 @@ func associateSendgridEventWithUser(db *sql.DB, messageID string, userID int) er
 
 type SendGridEventBody struct {
 	Email         string   `json:"email"`
+	FromAddress   string   `json:"from"`
 	Event         string   `json:"event"`
 	SGMessageID   string   `json:"sg_message_id"`
 	SGMachineOpen bool     `json:"sg_machine_open"`

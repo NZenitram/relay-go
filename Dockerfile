@@ -13,6 +13,9 @@ RUN go mod download
 # Copy the source from the current directory to the Working Directory inside the container
 COPY . .
 
+# Set environment variables for Go build to target x86_64 (amd64)
+ENV GOOS=linux GOARCH=amd64
+
 # Build the Go app
 RUN go build -o relay-go .
 

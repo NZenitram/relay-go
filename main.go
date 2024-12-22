@@ -17,7 +17,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var batchProcessor *BatchProcessor
+// var batchProcessor *BatchProcessor
 
 func init() {
 	envErr := godotenv.Load()
@@ -30,28 +30,28 @@ func init() {
 		log.Fatal("REDIS_HOST environment variable is not set")
 	}
 
-	redisPass := os.Getenv("REDIS_PASSWORD")
-	if redisAddr == "" {
-		log.Fatal("REDIS_HOST environment variable is not set")
-	}
+	// redisPass := os.Getenv("REDIS_PASSWORD")
+	// if redisAddr == "" {
+	// 	log.Fatal("REDIS_HOST environment variable is not set")
+	// }
 
 	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
 	if len(kafkaBrokers) == 0 {
 		log.Fatal("KAFKA_BROKERS environment variable is not set")
 	}
 
-	database.InitDB()
-	db := database.GetDB()
+	// database.InitDB()
+	// db := database.GetDB()
 	// Initialize your database connection, Redis address, and Kafka brokers
 
-	var err error
-	batchProcessor, err = NewBatchProcessor(db, redisAddr, redisPass, kafkaBrokers)
-	if err != nil {
-		log.Fatalf("Failed to create batch processor: %v", err)
-	}
+	// var err error
+	// batchProcessor, err = NewBatchProcessor(db, redisAddr, redisPass, kafkaBrokers)
+	// if err != nil {
+	// 	log.Fatalf("Failed to create batch processor: %v", err)
+	// }
 
-	// Start processing scheduled emails in a separate goroutine
-	go batchProcessor.ProcessScheduledEmails()
+	// // Start processing scheduled emails in a separate goroutine
+	// go batchProcessor.ProcessScheduledEmails()
 }
 
 func main() {
@@ -141,23 +141,23 @@ func main() {
 			return
 		}
 
-		message := Message{
-			MessageID: messageID,
-			UserID:    user.ID,
-			Body:      body,
-		}
+		// message := Message{
+		// 	MessageID: messageID,
+		// 	UserID:    user.ID,
+		// 	Body:      body,
+		// }
 
-		if emailPayload.CustomArgs["IsBatch"] == "true" {
-			err := batchProcessor.HandleBatchSend(user.ID, message)
-			if err != nil {
-				http.Error(w, fmt.Sprintf("Failed to handle batch send: %v", err), http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusAccepted)
-			w.Write([]byte(fmt.Sprintf(`{"message": "Batch email processing started", "batch_id": %v}`, messageID)))
-		} else {
-			handleRequest(w, producer, emailTopic, message)
-		}
+		// if emailPayload.CustomArgs["IsBatch"] == "true" {
+		// 	err := batchProcessor.HandleBatchSend(user.ID, message)
+		// 	if err != nil {
+		// 		http.Error(w, fmt.Sprintf("Failed to handle batch send: %v", err), http.StatusInternalServerError)
+		// 		return
+		// 	}
+		// 	w.WriteHeader(http.StatusAccepted)
+		// 	w.Write([]byte(fmt.Sprintf(`{"message": "Batch email processing started", "batch_id": %v}`, messageID)))
+		// } else {
+		// 	handleRequest(w, producer, emailTopic, message)
+		// }
 	})
 
 	// Set up the HTTP server for webhooks
@@ -198,7 +198,7 @@ func main() {
 				log.Printf("Failed to unmarshal SendGridEventBody: %v", err)
 				continue
 			}
-			err = associateSendgridEventWithUser(db, sgEventBody.SGMessageID, userID)
+			err = associateSendgridEventWithUser(db, sgEventBody, userID)
 			if err != nil {
 				log.Printf("Failed to associate event with user: %v", err)
 				// Decide whether to continue or return based on your error handling strategy
@@ -307,11 +307,11 @@ func main() {
 		handleRequest(w, producer, webhookTopicSocketlabs, message)
 	})
 
-	// Listen on the specified port
-	log.Printf("Listening on port %s...", port)
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Failed to start HTTP server: %v", err)
-	}
+	http.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "healthy"}`))
+	})
 
 	// Listen on the specified port
 	log.Printf("Listening on port %s...", port)
