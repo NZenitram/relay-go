@@ -37,10 +37,12 @@ func verifyPostmarkWebhookAndFindUser(db *sql.DB, headers http.Header) (int, int
 
 func associatePostmarkEventWithUser(db *sql.DB, messageID string, userID, espID int) error {
 	_, err := db.Exec(`
-        INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
-        VALUES ($1, $2, $3, 'postmark')
-        ON CONFLICT (message_id, provider) DO NOTHING
-    `, messageID, userID, espID)
+	INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
+	SELECT ?, ?, esp_id, 'postmark'
+	FROM email_service_providers
+	WHERE user_id = ? AND provider_name = 'postmark'
+	ON DUPLICATE KEY UPDATE id = id
+`, messageID, userID, userID)
 
 	if err != nil {
 		return fmt.Errorf("failed to insert message association: %v", err)

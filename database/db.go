@@ -7,7 +7,8 @@ import (
 	"os"
 	"sync"
 
-	_ "github.com/lib/pq"
+	// _ "github.com/lib/pq"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 var (
@@ -15,6 +16,7 @@ var (
 	once sync.Once
 )
 
+// InitDB initializes the database connection
 func InitDB() {
 	once.Do(func() {
 		var err error
@@ -29,9 +31,11 @@ func InitDB() {
 		dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 			dbUser, dbPassword, dbHost, dbPort, dbName)
 
-		// Add SSL mode if specified
-		if sslMode != "" {
-			dsn += "&tls=" + sslMode
+		// Handle SSL mode
+		if sslMode == "disable" {
+			dsn += "&tls=false"
+		} else if sslMode != "" {
+			dsn += "&tls=true"
 		}
 
 		// Open the database connection
