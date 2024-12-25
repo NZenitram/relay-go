@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/sendgrid/sendgrid-go/helpers/eventwebhook"
 )
@@ -16,6 +17,11 @@ type SendgridWebhookPayload struct {
 }
 
 func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Header) (int, error) {
+	// Short-circuit for development purposes if user ID is 1
+	if devMode := os.Getenv("DEV_MODE"); devMode == "true" {
+		return 1, nil
+	}
+
 	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
 	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
 
@@ -53,13 +59,15 @@ func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Head
 	return 0, fmt.Errorf("no matching user found for the given webhook signature: %v", signature)
 }
 
-func associateSendgridEventWithUser(db *sql.DB, messageID string, userID int) error {
+func associateSendgridEventWithUser(db *sql.DB, sgEventBody SendGridEventBody, userID int) error {
 	// Insert the association into the message_user_associations table
 	_, err := db.Exec(`
-        INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
-        VALUES ($1, $2, (SELECT esp_id FROM email_service_providers WHERE user_id = $2 AND provider_name = 'sendgrid'), 'sendgrid')
-        ON CONFLICT (message_id, provider) DO NOTHING
-    `, messageID, userID)
+		INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
+		SELECT ?, ?, esp_id, 'sendgrid'
+		FROM email_service_providers
+		WHERE user_id = ? AND provider_name = 'sendgrid'
+		ON DUPLICATE KEY UPDATE id = id
+`, sgEventBody.SGMessageID, userID, userID)
 	if err != nil {
 		return fmt.Errorf("failed to insert message association: %v", err)
 	}
@@ -69,6 +77,7 @@ func associateSendgridEventWithUser(db *sql.DB, messageID string, userID int) er
 
 type SendGridEventBody struct {
 	Email         string   `json:"email"`
+	FromAddress   string   `json:"from,omitempty"`
 	Event         string   `json:"event"`
 	SGMessageID   string   `json:"sg_message_id"`
 	SGMachineOpen bool     `json:"sg_machine_open"`

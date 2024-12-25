@@ -80,18 +80,22 @@ func (bp *BatchProcessor) HandleBatchSend(userID int, messagePayload Message) er
 func (bp *BatchProcessor) createBatchRecord(userID int, emailPayload EmailPayload, totalBatches int) (int, error) {
 	batchSize := emailPayload.CustomArgs["BatchSize"]
 	intervalSeconds := emailPayload.CustomArgs["BatchInterval"]
-	var batchID int
-	err := bp.db.QueryRow(`
-		INSERT INTO email_batches (user_id, total_messages, batch_size, interval_seconds, total_batches, created_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING batch_id
-	`, userID, len(emailPayload.Personalizations), batchSize, intervalSeconds, totalBatches, time.Now().UTC(), "pending").Scan(&batchID)
+
+	result, err := bp.db.Exec(`
+        INSERT INTO email_batches (user_id, total_messages, batch_size, interval_seconds, total_batches, created_at, status)
+        VALUES (?, ?, ?, ?, ?, NOW(), ?)
+    `, userID, len(emailPayload.Personalizations), batchSize, intervalSeconds, totalBatches, "pending")
 
 	if err != nil {
 		return 0, fmt.Errorf("failed to insert batch record: %v", err)
 	}
 
-	return batchID, nil
+	batchID, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get last insert ID: %v", err)
+	}
+
+	return int(batchID), nil
 }
 
 func (bp *BatchProcessor) storeEmailsInRedis(batchID int, messagePayload Message, batchSize, totalBatches int) error {
@@ -374,10 +378,10 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 
 	// Update the database after processing all due emails in this loop
 	_, err = bp.db.ExecContext(bp.ctx, `
-        UPDATE email_batches 
-        	SET batches_to_kafka = $1, 
-            updated_at = CURRENT_TIMESTAMP 
-       		WHERE batch_id = $2`, newBatchIndex, batchID)
+    UPDATE email_batches 
+    SET batches_to_kafka = ?, 
+        updated_at = CURRENT_TIMESTAMP 
+    WHERE batch_id = ?`, newBatchIndex, batchID)
 	if err != nil {
 		log.Printf("Failed to update processed_emails for batch %d: %v", batchID, err)
 	}
