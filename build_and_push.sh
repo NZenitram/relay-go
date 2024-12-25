@@ -5,7 +5,7 @@ REGION="us-east-2"
 ACCOUNT_ID="257394459269"
 REPOSITORY_NAME="sh-relay-go/sh-relay-go-ingest"
 IMAGE_NAME="relay-go"
-TAG="build"
+TAG="latest"
 
 # Build the Docker image
 echo "Building Docker image..."

@@ -205,6 +205,8 @@ func main() {
 			}
 		}
 
+		message.UserID = userID
+
 		handleRequest(w, producer, webhookTopicSendGrid, message)
 	})
 

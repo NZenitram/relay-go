@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/sendgrid/sendgrid-go/helpers/eventwebhook"
 )
@@ -16,6 +17,11 @@ type SendgridWebhookPayload struct {
 }
 
 func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Header) (int, error) {
+	// Short-circuit for development purposes if user ID is 1
+	if devMode := os.Getenv("DEV_MODE"); devMode == "true" {
+		return 1, nil
+	}
+
 	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
 	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
 
@@ -71,7 +77,7 @@ func associateSendgridEventWithUser(db *sql.DB, sgEventBody SendGridEventBody, u
 
 type SendGridEventBody struct {
 	Email         string   `json:"email"`
-	FromAddress   string   `json:"from"`
+	FromAddress   string   `json:"from,omitempty"`
 	Event         string   `json:"event"`
 	SGMessageID   string   `json:"sg_message_id"`
 	SGMachineOpen bool     `json:"sg_machine_open"`
