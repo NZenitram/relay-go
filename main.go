@@ -55,6 +55,10 @@ func init() {
 }
 
 func main() {
+	port := os.Getenv("HTTP_SERVER_PORT")
+	if port == "" {
+		log.Fatal("HTTP_SERVER_PORT environment variable is not set")
+	}
 
 	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
 	if len(kafkaBrokers) == 0 {
@@ -86,20 +90,21 @@ func main() {
 		log.Fatal("WEBHOOK_TOPIC_SOCKETLABS environment variable is not set")
 	}
 
-	port := os.Getenv("HTTP_SERVER_PORT")
-	if port == "" {
-		log.Fatal("HTTP_SERVER_PORT environment variable is not set")
-	}
+	var producer sarama.SyncProducer
+	var err error
 
-	database.InitDB()
-	db := database.GetDB()
+	// Initialize data stores (MySQL+Kafka or DynamoDB)
+	database.InitDataStores()
 
-	// Set up the Kafka producer
-	producer, err := sarama.NewSyncProducer(kafkaBrokers, nil)
-	if err != nil {
-		log.Fatalf("Failed to start Kafka producer: %v", err)
+	// Only initialize Kafka if we're in MySQL+Kafka mode
+	if database.IsMySQLKafkaMode() {
+		// Set up the Kafka producer
+		producer, err = sarama.NewSyncProducer(kafkaBrokers, nil)
+		if err != nil {
+			log.Fatalf("Failed to start Kafka producer: %v", err)
+		}
+		defer producer.Close()
 	}
-	defer producer.Close()
 
 	// Set up the HTTP server for emails
 
@@ -107,7 +112,7 @@ func main() {
 		authHeader := r.Header.Get("Authorization")
 		apiKey := extractAPIKey(authHeader)
 
-		user, validateAPIKeyError := validateAPIKey(db, apiKey)
+		user, validateAPIKeyError := validateAPIKey(database.GetDB(), apiKey)
 		if validateAPIKeyError != nil {
 			logInvalidAttempt(apiKey)
 			http.Error(w, "Invalid API key", http.StatusUnauthorized)
@@ -135,7 +140,7 @@ func main() {
 		messageID := uuid.New().String()
 
 		// Store the email request
-		err := storeEmailRequest(db, user.ID, messageID)
+		err := storeEmailRequest(database.GetDB(), user.ID, messageID)
 		if err != nil {
 			http.Error(w, "Failed to store email request", http.StatusInternalServerError)
 			return
@@ -169,11 +174,18 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		// Verify the webhook and find the associated user
+		var userID int
+		var verifyErr error
 
-		userID, err := verifySendgridWebhookAndFindUser(db, body, r.Header)
-		if err != nil {
-			log.Printf("Sendgrid - Failed to verify webhook: %v", err)
+		// Check which data store is available and use appropriate verification
+		if database.IsMySQLKafkaMode() {
+			userID, verifyErr = verifySendgridWebhookAndFindUser(database.GetDB(), body, r.Header)
+		} else {
+			userID, verifyErr = verifySendgridWebhookAndFindUserDynamoDB(database.GetDynamoClient(), body, r.Header)
+		}
+
+		if verifyErr != nil {
+			log.Printf("Sendgrid - Failed to verify webhook: %v", verifyErr)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
@@ -181,33 +193,44 @@ func main() {
 		message := Message{
 			Headers: r.Header,
 			Body:    body,
+			UserID:  userID,
 		}
 
-		var events []json.RawMessage
-		err = json.Unmarshal(message.Body, &events)
-		if err != nil {
-			log.Printf("Failed to unmarshal message body: %v", err)
-			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
-			return
-		}
-
-		for _, eventData := range events {
-			var sgEventBody SendGridEventBody
-			err = json.Unmarshal(eventData, &sgEventBody)
-			if err != nil {
-				log.Printf("Failed to unmarshal SendGridEventBody: %v", err)
-				continue
+		// Process events based on available data store
+		if database.IsMySQLKafkaMode() {
+			// Full mode: Process with MySQL and Kafka
+			var events []json.RawMessage
+			if err := json.Unmarshal(message.Body, &events); err != nil {
+				log.Printf("Failed to unmarshal message body: %v", err)
+				http.Error(w, "Failed to process event payload", http.StatusBadRequest)
+				return
 			}
-			err = associateSendgridEventWithUser(db, sgEventBody, userID)
-			if err != nil {
-				log.Printf("Failed to associate event with user: %v", err)
-				// Decide whether to continue or return based on your error handling strategy
+
+			for _, eventData := range events {
+				var sgEventBody SendGridEventBody
+				if err := json.Unmarshal(eventData, &sgEventBody); err != nil {
+					log.Printf("Failed to unmarshal SendGridEventBody: %v", err)
+					continue
+				}
+				if err := associateSendgridEventWithUser(database.GetDB(), sgEventBody, userID); err != nil {
+					log.Printf("Failed to associate event with user: %v", err)
+					// Continue processing other events
+				}
 			}
+
+			// Send to Kafka
+			handleRequest(w, producer, os.Getenv("WEBHOOK_TOPIC_SENDGRID"), message)
+		} else {
+			// print userID
+			log.Printf("UserID: %v", userID)
+			// Light mode: Send directly to Splunk
+			if err := sendToSplunkHEC(body, userID); err != nil {
+				log.Printf("Failed to send to Splunk: %v", err)
+				http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
 		}
-
-		message.UserID = userID
-
-		handleRequest(w, producer, webhookTopicSendGrid, message)
 	})
 
 	http.HandleFunc("/webhook-events/sparkpost", func(w http.ResponseWriter, r *http.Request) {
@@ -220,7 +243,7 @@ func main() {
 
 		// Verify the webhook and find the associated user
 
-		userID, espID, err := verifySparkPostWebhookAndFindUser(db, r.Header)
+		userID, espID, err := verifySparkPostWebhookAndFindUser(database.GetDB(), r.Header)
 		if err != nil {
 			log.Printf("Sparkpost - Failed to verify webhook: %v", err)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
@@ -238,7 +261,7 @@ func main() {
 		}
 
 		for _, event := range sparkPostPayload {
-			err = associateSparkPostEventWithUser(db, event.Msys.MessageEvent.MessageID, userID, espID)
+			err = associateSparkPostEventWithUser(database.GetDB(), event.Msys.MessageEvent.MessageID, userID, espID)
 			if err != nil {
 				log.Printf("Failed to associate event with user: %v", err)
 				// Decide whether to continue or return based on your error handling strategy
@@ -261,7 +284,7 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		userID, espID, err := verifyPostmarkWebhookAndFindUser(db, r.Header)
+		userID, espID, err := verifyPostmarkWebhookAndFindUser(database.GetDB(), r.Header)
 		if err != nil {
 			log.Printf("Postmark - Failed to verify webhook: %v", err)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
@@ -278,7 +301,7 @@ func main() {
 			return
 		}
 
-		err = associatePostmarkEventWithUser(db, postmarkEvent.MessageID, userID, espID)
+		err = associatePostmarkEventWithUser(database.GetDB(), postmarkEvent.MessageID, userID, espID)
 		if err != nil {
 			log.Printf("Failed to associate event with user: %v", err)
 			http.Error(w, "Failed to process event", http.StatusInternalServerError)

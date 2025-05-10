@@ -7,7 +7,6 @@ import (
 	"os"
 	"sync"
 
-	// _ "github.com/lib/pq"
 	_ "github.com/go-sql-driver/mysql"
 )
 
@@ -17,9 +16,9 @@ var (
 )
 
 // InitDB initializes the database connection
-func InitDB() {
+func InitDB() error {
+	var initErr error
 	once.Do(func() {
-		var err error
 		dbHost := os.Getenv("MYSQL_HOST")
 		dbPort := os.Getenv("MYSQL_PORT")
 		dbUser := os.Getenv("MYSQL_USER")
@@ -39,48 +38,21 @@ func InitDB() {
 		}
 
 		// Open the database connection
-		db, err = sql.Open("mysql", dsn)
-		if err != nil {
-			log.Fatalf("Error opening database connection: %v", err)
+		db, initErr = sql.Open("mysql", dsn)
+		if initErr != nil {
+			return
 		}
 
 		// Ping the database to verify the connection
-		err = db.Ping()
-		if err != nil {
-			log.Fatalf("Error pinging database: %v", err)
+		initErr = db.Ping()
+		if initErr != nil {
+			return
 		}
 
 		log.Println("Successfully connected to the MySQL database")
 	})
+	return initErr
 }
-
-// // InitDB initializes the database connection
-// func InitDB() {
-// 	once.Do(func() {
-// 		var err error
-// 		dbHost := os.Getenv("POSTGRES_HOST")
-// 		dbPort := os.Getenv("POSTGRES_PORT")
-// 		dbUser := os.Getenv("POSTGRES_USER")
-// 		dbPassword := os.Getenv("POSTGRES_PASSWORD")
-// 		dbName := os.Getenv("POSTGRES_DB")
-// 		sslMode := os.Getenv("POSTGRES_SSL_MODE")
-
-// 		connStr := fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-// 			dbHost, dbPort, dbUser, dbPassword, dbName, sslMode)
-
-// 		db, err = sql.Open("postgres", connStr)
-// 		if err != nil {
-// 			log.Fatalf("Error opening database connection: %v", err)
-// 		}
-
-// 		err = db.Ping()
-// 		if err != nil {
-// 			log.Fatalf("Error pinging database: %v", err)
-// 		}
-
-// 		log.Println("Successfully connected to the database")
-// 	})
-// }
 
 // GetDB returns the database connection
 func GetDB() *sql.DB {
