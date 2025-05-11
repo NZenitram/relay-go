@@ -1,8 +1,9 @@
 package database
 
 import (
-	"log"
+	"context"
 	"os"
+	"relay-go/m/logger"
 	"sync"
 
 	"github.com/Shopify/sarama"
@@ -17,6 +18,7 @@ var (
 func InitKafka() error {
 	var initErr error
 	kafkaOnce.Do(func() {
+		ctx := context.Background()
 		brokers := []string{os.Getenv("KAFKA_BROKERS")}
 
 		config := sarama.NewConfig()
@@ -28,7 +30,7 @@ func InitKafka() error {
 			return
 		}
 
-		log.Println("Successfully connected to Kafka")
+		logger.Info(ctx, "kafka", "Successfully connected to Kafka")
 	})
 	return initErr
 }
@@ -36,7 +38,7 @@ func InitKafka() error {
 // GetKafkaClient returns the Kafka client
 func GetKafkaClient() sarama.SyncProducer {
 	if kafkaClient == nil {
-		log.Fatal("Kafka client has not been initialized. Call InitKafka() first.")
+		logger.Fatal(context.Background(), "kafka", "Kafka client has not been initialized. Call InitKafka() first.", nil)
 	}
 	return kafkaClient
 }
@@ -45,6 +47,6 @@ func GetKafkaClient() sarama.SyncProducer {
 func CloseKafka() {
 	if kafkaClient != nil {
 		kafkaClient.Close()
-		log.Println("Kafka connection closed")
+		logger.Info(context.Background(), "kafka", "Kafka connection closed")
 	}
 }

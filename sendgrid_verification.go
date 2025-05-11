@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -9,6 +10,9 @@ import (
 	"net/http"
 	"relay-go/m/database"
 	"strconv"
+	"time"
+
+	"relay-go/m/logger"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -29,12 +33,75 @@ type SendgridWebhookPayload struct {
 	Body    json.RawMessage     `json:"body"`
 }
 
+type SendGridVerification struct {
+	httpClient *http.Client
+	apiKey     string
+}
+
+func NewSendGridVerification(apiKey string) *SendGridVerification {
+	return &SendGridVerification{
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		apiKey: apiKey,
+	}
+}
+
+func (v *SendGridVerification) VerifyEmail(ctx context.Context, email string) (bool, error) {
+	url := fmt.Sprintf("https://api.sendgrid.com/v3/validations/email", email)
+
+	body := map[string]string{
+		"email": email,
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		logger.Error(ctx, "sendgrid-verification", "Failed to marshal request body", err)
+		return false, fmt.Errorf("failed to marshal request body: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		logger.Error(ctx, "sendgrid-verification", "Failed to create request", err)
+		return false, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", v.apiKey))
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v.httpClient.Do(req)
+	if err != nil {
+		logger.Error(ctx, "sendgrid-verification", "Failed to send request", err)
+		return false, fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Error(ctx, "sendgrid-verification", "Received non-200 response", fmt.Errorf("status: %d", resp.StatusCode))
+		return false, fmt.Errorf("received non-200 response: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Valid bool `json:"valid"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		logger.Error(ctx, "sendgrid-verification", "Failed to decode response", err)
+		return false, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	logger.Info(ctx, "sendgrid-verification", "Email verification completed", map[string]interface{}{
+		"email": email,
+		"valid": result.Valid,
+	})
+	return result.Valid, nil
+}
+
 func isMySQLAvailable(db *sql.DB) bool {
 	err := db.Ping()
 	return err == nil
 }
 
 func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Header) (int, error) {
+	ctx := context.Background()
 	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
 	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
 
@@ -63,7 +130,9 @@ func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Head
 
 		ecdaKey, err := eventwebhook.ConvertPublicKeyBase64ToECDSA(verificationKey)
 		if err != nil {
-			log.Printf("Cannot convert public key for user ID %d: %v", userID, err)
+			logger.Error(ctx, "sendgrid-verification", "Cannot convert public key", err, map[string]interface{}{
+				"user_id": userID,
+			})
 			continue
 		}
 
@@ -82,6 +151,7 @@ func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Head
 }
 
 func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []byte, headers http.Header) (int, error) {
+	ctx := context.Background()
 	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
 	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
 
@@ -109,7 +179,6 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 			log.Printf("Cache error for user ID %s: %v", userIDStr, err)
 			// Continue with DynamoDB data if cache fails
 		} else if cacheHit {
-			log.Printf("Cache hit for user ID %s", userIDStr)
 			// Use cached verification key
 			verificationKey = cachedUser.SendGridVerificationKey
 		} else {
@@ -126,13 +195,17 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 				log.Printf("Failed to cache user data for ID %s: %v", userIDStr, err)
 				// Continue with DynamoDB data if caching fails
 			} else {
-				log.Printf("Successfully cached user data for ID %s", userIDStr)
+				logger.Info(ctx, "sendgrid-verification", "Successfully cached user data", map[string]interface{}{
+					"user_id": userIDStr,
+				})
 			}
 		}
 
 		ecdaKey, err := eventwebhook.ConvertPublicKeyBase64ToECDSA(verificationKey)
 		if err != nil {
-			log.Printf("Cannot convert public key for user ID %s: %v", userIDStr, err)
+			logger.Error(ctx, "sendgrid-verification", "Cannot convert public key", err, map[string]interface{}{
+				"user_id": userIDStr,
+			})
 			continue
 		}
 

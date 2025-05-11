@@ -2,40 +2,54 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log"
+	"io"
 	"net/http"
-	"os"
+	"relay-go/m/logger"
 )
 
-func sendToSplunkHEC(data []byte, userID int) error {
-	// Retrieve environment variables
-	splunkHost := os.Getenv("SPLUNK_HOST")
-	if splunkHost == "" {
-		log.Fatal("SPLUNK_HOST environment variable is not set")
-	}
-	splunkToken := os.Getenv("SPLUNK_KEY")
-	if splunkToken == "" {
-		log.Fatal("SPLUNK_KEY environment variable is not set")
-	}
+type SplunkEvent struct {
+	Time       int64                  `json:"time"`
+	Host       string                 `json:"host"`
+	Source     string                 `json:"source"`
+	Sourcetype string                 `json:"sourcetype"`
+	Event      map[string]interface{} `json:"event"`
+}
 
-	// Construct the Splunk URL using the environment variable
-	splunkURL := fmt.Sprintf("https://%s.splunkcloud.com:8088/services/collector/event", splunkHost)
+type SplunkClient struct {
+	httpClient *http.Client
+	host       string
+	token      string
+}
 
-	// Unmarshal the data into a slice of maps
-	var events []map[string]interface{}
-	if err := json.Unmarshal(data, &events); err != nil {
-		return fmt.Errorf("failed to unmarshal data: %v", err)
-	}
-
+func NewSplunkClient(host, token string) *SplunkClient {
 	// Create a custom HTTP client that ignores TLS verification
 	client := &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		},
 	}
+
+	return &SplunkClient{
+		httpClient: client,
+		host:       host,
+		token:      token,
+	}
+}
+
+func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int) error {
+	// Unmarshal the data into a slice of maps
+	var events []map[string]interface{}
+	if err := json.Unmarshal(data, &events); err != nil {
+		logger.Error(ctx, "splunk", "Failed to unmarshal data", err)
+		return fmt.Errorf("failed to unmarshal data: %v", err)
+	}
+
+	// Construct the Splunk URL
+	splunkURL := fmt.Sprintf("https://%s.splunkcloud.com:8088/services/collector/event", c.host)
 
 	// Send each event separately
 	for _, event := range events {
@@ -48,31 +62,37 @@ func sendToSplunkHEC(data []byte, userID int) error {
 		}
 		jsonBody, err := json.Marshal(requestBody)
 		if err != nil {
+			logger.Error(ctx, "splunk", "Failed to marshal request body", err)
 			return fmt.Errorf("failed to marshal request body: %v", err)
 		}
 
 		// Create the HTTP request
-		req, err := http.NewRequest("POST", splunkURL, bytes.NewBuffer(jsonBody))
+		req, err := http.NewRequestWithContext(ctx, "POST", splunkURL, bytes.NewBuffer(jsonBody))
 		if err != nil {
+			logger.Error(ctx, "splunk", "Failed to create request", err)
 			return fmt.Errorf("failed to create request: %v", err)
 		}
 
 		// Set headers
-		req.Header.Set("Authorization", "Splunk "+splunkToken)
+		req.Header.Set("Authorization", "Splunk "+c.token)
 		req.Header.Set("Content-Type", "application/json")
 
 		// Send the request
-		resp, err := client.Do(req)
+		resp, err := c.httpClient.Do(req)
 		if err != nil {
+			logger.Error(ctx, "splunk", "Failed to send request", err)
 			return fmt.Errorf("failed to send request: %v", err)
 		}
 		defer resp.Body.Close()
 
 		// Check the response
 		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			logger.Error(ctx, "splunk", "Received non-200 response", fmt.Errorf("status: %d, body: %s", resp.StatusCode, string(body)))
 			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 		}
 	}
 
+	logger.Info(ctx, "splunk", "Successfully sent all events to Splunk")
 	return nil
 }

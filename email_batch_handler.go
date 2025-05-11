@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"relay-go/m/logger"
 	"sort"
 	"strconv"
 	"strings"
@@ -191,14 +192,12 @@ func (bp *BatchProcessor) scheduleEmailSending(batchID int, schedule []int, batc
 }
 
 func (bp *BatchProcessor) ProcessScheduledEmails() {
-	log.Println("Debug: Starting ProcessScheduledEmails")
+	ctx := context.Background()
+	logger.Info(ctx, "batch-processor", "Starting ProcessScheduledEmails")
 	for {
-		// log.Println("Debug: Checking for due emails")
-		// Check for due emails every minute
 		time.Sleep(1 * time.Minute)
 
 		now := time.Now().Unix()
-		// log.Printf("Debug: Current timestamp: %d", now)
 
 		batchInfos, err := bp.redis.ZRangeByScore(bp.ctx, "scheduled_emails", &redis.ZRangeBy{
 			Min: "0",
@@ -206,24 +205,24 @@ func (bp *BatchProcessor) ProcessScheduledEmails() {
 		}).Result()
 
 		if err != nil {
-			log.Printf("Error: Failed to fetch due emails: %v", err)
+			logger.Error(ctx, "batch-processor", "Failed to fetch due emails", err)
 			continue
 		}
 
-		// log.Printf("Debug: Found %d due emails", len(batchInfos))
-
 		for i, batchInfoJSON := range batchInfos {
-			log.Printf("Debug: Processing batch info %d: %s", i, batchInfoJSON)
+			logger.Info(ctx, "batch-processor", "Processing batch info", map[string]interface{}{
+				"batch_index": i,
+				"batch_info":  batchInfoJSON,
+			})
 
-			// Attempt to retrieve the actual batch info from the hash
-			jobKey := batchInfoJSON // batchInfoJSON is actually the jobKey in this case
+			jobKey := batchInfoJSON
 			actualBatchInfo, err := bp.redis.HGet(bp.ctx, jobKey, "info").Result()
 			if err != nil {
-				log.Printf("Error: Failed to retrieve batch info for key %s: %v", jobKey, err)
+				logger.Error(ctx, "batch-processor", "Failed to retrieve batch info", err, map[string]interface{}{
+					"job_key": jobKey,
+				})
 				continue
 			}
-
-			// log.Printf("Debug: Retrieved actual batch info: %s", actualBatchInfo)
 
 			var batchInfo struct {
 				BatchID    int `json:"batch_id"`
@@ -233,82 +232,96 @@ func (bp *BatchProcessor) ProcessScheduledEmails() {
 
 			err = json.Unmarshal([]byte(actualBatchInfo), &batchInfo)
 			if err != nil {
-				log.Printf("Error: Failed to unmarshal batch info: %v", err)
-				log.Printf("Debug: Problematic JSON: %s", actualBatchInfo)
+				logger.Error(ctx, "batch-processor", "Failed to unmarshal batch info", err, map[string]interface{}{
+					"batch_info_json": actualBatchInfo,
+				})
 				continue
 			}
 
-			// log.Printf("Debug: Unmarshaled batch info: %+v", batchInfo)
-
-			// log.Printf("Debug: Processing batch ID %d, size %d, index %d", batchInfo.BatchID, batchInfo.BatchSize, batchInfo.BatchIndex)
 			bp.processBatch(batchInfo.BatchID, batchInfo.BatchSize)
 
-			// log.Printf("Debug: Removing processed batch from scheduled_emails")
 			removeResult, err := bp.redis.ZRem(bp.ctx, "scheduled_emails", jobKey).Result()
 			if err != nil {
-				log.Printf("Error: Failed to remove processed batch from scheduled_emails: %v", err)
+				logger.Error(ctx, "batch-processor", "Failed to remove processed batch from scheduled_emails", err)
 			} else {
-				log.Printf("Debug: Removed %d entries from scheduled_emails", removeResult)
+				logger.Info(ctx, "batch-processor", "Removed entries from scheduled_emails", map[string]interface{}{
+					"removed_count": removeResult,
+				})
 			}
 
-			// Clean up the hash entry
 			deleteResult, err := bp.redis.Del(bp.ctx, jobKey).Result()
 			if err != nil {
-				log.Printf("Error: Failed to delete hash entry for %s: %v", jobKey, err)
+				logger.Error(ctx, "batch-processor", "Failed to delete hash entry", err, map[string]interface{}{
+					"job_key": jobKey,
+				})
 			} else {
-				log.Printf("Debug: Deleted %d hash entries for %s", deleteResult, jobKey)
+				logger.Info(ctx, "batch-processor", "Deleted hash entries", map[string]interface{}{
+					"deleted_count": deleteResult,
+					"job_key":       jobKey,
+				})
 			}
 		}
 	}
 }
 
 func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
-	log.Printf("Debug: Starting to process batch %d with size %d", batchID, batchSize)
+	ctx := context.Background()
+	logger.Info(ctx, "batch-processor", "Starting to process batch", map[string]interface{}{
+		"batch_id":   batchID,
+		"batch_size": batchSize,
+	})
+
 	batchKey := fmt.Sprintf("batch:%d", batchID)
 
-	// Fetch common data
 	commonDataJSON, err := bp.redis.HGet(bp.ctx, batchKey, "common").Result()
 	if err != nil {
-		log.Printf("Failed to fetch common email data for batch %d: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to fetch common email data", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 		return
 	}
 
 	var emailPayload EmailPayload
 	err = json.Unmarshal([]byte(commonDataJSON), &emailPayload)
 	if err != nil {
-		log.Printf("Failed to unmarshal common email data for batch %d: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to unmarshal common email data", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 		return
 	}
 
-	// Fetch the current batch index
 	currentBatchIndex, err := bp.redis.HGet(bp.ctx, batchKey, "current_batch_index").Int()
 	if err != nil && err != redis.Nil {
-		log.Printf("Failed to fetch current batch index for batch %d: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to fetch current batch index", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 		return
 	}
 
-	// Fetch Message ID
 	messageID, err := bp.redis.HGet(bp.ctx, batchKey, "msg_id").Result()
 	if err != nil && err != redis.Nil {
-		log.Printf("Failed to fetch MessageID for batch %d: %v", messageID, err)
+		logger.Error(ctx, "batch-processor", "Failed to fetch MessageID", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 		return
 	}
 
-	// Fetch User ID
 	userID, err := bp.redis.HGet(bp.ctx, batchKey, "user_id").Int()
 	if err != nil && err != redis.Nil {
-		log.Printf("Failed to fetch user ID for batch %d: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to fetch user ID", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 		return
 	}
 
-	// Fetch all personalization keys
 	allKeys, err := bp.redis.HKeys(bp.ctx, batchKey).Result()
 	if err != nil {
-		log.Printf("Failed to fetch keys for batch %d: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to fetch keys", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 		return
 	}
 
-	// Filter and sort personalization keys
 	var pKeys []string
 	for _, key := range allKeys {
 		if strings.HasPrefix(key, "p:") {
@@ -317,38 +330,37 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 	}
 	sort.Strings(pKeys)
 
-	// log.Printf("Debug: Found %d personalization keys for batch %d", len(pKeys), batchID)
-
-	// Calculate start and end indices for this batch
 	numLoops := batchSize
 	if len(pKeys) < numLoops {
 		numLoops = len(pKeys)
 	}
 
-	// Process personalizations for this batch
 	var emptyPersonalization []Personalization
 	emailPayload.Personalizations = emptyPersonalization
 
 	for i := 0; i < numLoops; i++ {
 		personalizationKey := pKeys[i]
-		// log.Printf("Debug: Processing key %s for batch %d", personalizationKey, batchID)
 
 		personalizationJSON, err := bp.redis.HGet(bp.ctx, batchKey, personalizationKey).Result()
 		if err != nil {
-			log.Printf("Failed to fetch personalization data for batch %d, key %s: %v", batchID, personalizationKey, err)
+			logger.Error(ctx, "batch-processor", "Failed to fetch personalization data", err, map[string]interface{}{
+				"batch_id": batchID,
+				"key":      personalizationKey,
+			})
 			continue
 		}
 
 		var personalization Personalization
 		err = json.Unmarshal([]byte(personalizationJSON), &personalization)
 		if err != nil {
-			log.Printf("Failed to unmarshal personalization data for batch %d, key %s: %v", batchID, personalizationKey, err)
+			logger.Error(ctx, "batch-processor", "Failed to unmarshal personalization data", err, map[string]interface{}{
+				"batch_id": batchID,
+				"key":      personalizationKey,
+			})
 			continue
 		}
 
 		emailPayload.Personalizations = append(emailPayload.Personalizations, personalization)
-
-		// Remove processed personalization from Redis
 		bp.redis.HDel(bp.ctx, batchKey, personalizationKey)
 	}
 
@@ -359,10 +371,11 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 		Body:      emailPayload,
 	}
 
-	// Send to Kafka for processing
 	emailPayloadJSON, err := json.Marshal(kafkaMessage)
 	if err != nil {
-		log.Printf("Failed to marshal email payload for batch %d, key %s: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to marshal email payload", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 	}
 
 	_, _, err = bp.kafka.SendMessage(&sarama.ProducerMessage{
@@ -371,43 +384,37 @@ func (bp *BatchProcessor) processBatch(batchID int, batchSize int) {
 		Value: sarama.StringEncoder(emailPayloadJSON),
 	})
 	if err != nil {
-		log.Printf("Failed to send message to Kafka for batch %d, key %s: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to send message to Kafka", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 	}
 
 	newBatchIndex := currentBatchIndex + 1
 
-	// Update the database after processing all due emails in this loop
 	_, err = bp.db.ExecContext(bp.ctx, `
     UPDATE email_batches 
     SET batches_to_kafka = ?, 
         updated_at = CURRENT_TIMESTAMP 
     WHERE batch_id = ?`, newBatchIndex, batchID)
 	if err != nil {
-		log.Printf("Failed to update processed_emails for batch %d: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to update processed_emails", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 	}
-	// Update the current batch index
+
 	err = bp.redis.HSet(bp.ctx, batchKey, "current_batch_index", newBatchIndex).Err()
 	if err != nil {
-		log.Printf("Failed to update current batch index for batch %d: %v", batchID, err)
+		logger.Error(ctx, "batch-processor", "Failed to update current batch index", err, map[string]interface{}{
+			"batch_id": batchID,
+		})
 	}
 
-	// Check if this was the last batch
 	if numLoops == len(pKeys) {
-		// Update batch status to completed
-		// _, err = bp.db.ExecContext(bp.ctx, `
-		// UPDATE email_batches
-		// 	SET status = 'completed',
-		// 	updated_at = CURRENT_TIMESTAMP
-		// 	WHERE batch_id = $1`, batchID)
-		// if err != nil {
-		// 	log.Printf("Failed to update batch status to completed for batch %d: %v", batchID, err)
-		// }
-		// This was the last batch, clean up Redis
 		bp.redis.Del(bp.ctx, batchKey)
-		log.Printf("Batch %d completed and cleaned up", batchID)
+		logger.Info(ctx, "batch-processor", "Batch completed and cleaned up", map[string]interface{}{
+			"batch_id": batchID,
+		})
 	}
-
-	// log.Printf("Debug: Finished processing batch %d", batchID)
 }
 
 func calculateBatchSchedule(totalPersonalizations, batchSize, batchIntervalSeconds int) []int {

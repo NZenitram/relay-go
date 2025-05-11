@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"relay-go/m/database"
+	"relay-go/m/logger"
 	"strings"
 
 	"github.com/IBM/sarama"
@@ -17,17 +19,36 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// var batchProcessor *BatchProcessor
+var splunkClient *SplunkClient
 
 func init() {
 	envErr := godotenv.Load()
 	if envErr != nil {
-		log.Println("No .env file found, using system environment variables")
+		logger.Info(nil, "init", "No .env file found, using system environment variables")
+	}
+
+	// Set logger level based on environment
+	logLevel := os.Getenv("LOG_LEVEL")
+	if logLevel != "" {
+		switch logLevel {
+		case "DEBUG":
+			logger.SetLevel(logger.DEBUG)
+		case "INFO":
+			logger.SetLevel(logger.INFO)
+		case "WARNING":
+			logger.SetLevel(logger.WARNING)
+		case "ERROR":
+			logger.SetLevel(logger.ERROR)
+		case "FATAL":
+			logger.SetLevel(logger.FATAL)
+		default:
+			logger.SetLevel(logger.INFO)
+		}
 	}
 
 	redisAddr := os.Getenv("REDIS_HOST")
 	if redisAddr == "" {
-		log.Fatal("REDIS_HOST environment variable is not set")
+		logger.Fatal(nil, "init", "REDIS_HOST environment variable is not set", nil)
 	}
 
 	// redisPass := os.Getenv("REDIS_PASSWORD")
@@ -37,8 +58,24 @@ func init() {
 
 	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
 	if len(kafkaBrokers) == 0 {
-		log.Fatal("KAFKA_BROKERS environment variable is not set")
+		logger.Fatal(nil, "init", "KAFKA_BROKERS environment variable is not set", nil)
 	}
+
+	splunkHost := os.Getenv("SPLUNK_HOST")
+	if splunkHost == "" {
+		logger.Fatal(nil, "init", "SPLUNK_HOST environment variable is not set", nil)
+	}
+	splunkToken := os.Getenv("SPLUNK_KEY")
+	if splunkToken == "" {
+		logger.Fatal(nil, "init", "SPLUNK_KEY environment variable is not set", nil)
+	}
+
+	// Initialize data stores
+	if err := database.InitDataStores(); err != nil {
+		logger.Fatal(nil, "init", "Failed to initialize data stores", err)
+	}
+
+	splunkClient = NewSplunkClient(splunkHost, splunkToken)
 
 	// database.InitDB()
 	// db := database.GetDB()
@@ -57,51 +94,48 @@ func init() {
 func main() {
 	port := os.Getenv("HTTP_SERVER_PORT")
 	if port == "" {
-		log.Fatal("HTTP_SERVER_PORT environment variable is not set")
+		logger.Fatal(nil, "main", "HTTP_SERVER_PORT environment variable is not set", nil)
 	}
 
 	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
 	if len(kafkaBrokers) == 0 {
-		log.Fatal("KAFKA_BROKERS environment variable is not set")
+		logger.Fatal(nil, "main", "KAFKA_BROKERS environment variable is not set", nil)
 	}
 
 	emailTopic := os.Getenv("EMAIL_TOPIC")
 	if emailTopic == "" {
-		log.Fatal("EMAIL_TOPIC environment variable is not set")
+		logger.Fatal(nil, "main", "EMAIL_TOPIC environment variable is not set", nil)
 	}
 
 	webhookTopicSendGrid := os.Getenv("WEBHOOK_TOPIC_SENDGRID")
 	if webhookTopicSendGrid == "" {
-		log.Fatal("WEBHOOK_TOPIC_SENDGRID environment variable is not set")
+		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_SENDGRID environment variable is not set", nil)
 	}
 
 	webhookTopicSparkpost := os.Getenv("WEBHOOK_TOPIC_SPARKPOST")
 	if webhookTopicSparkpost == "" {
-		log.Fatal("WEBHOOK_TOPIC_SPARKPOST environment variable is not set")
+		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_SPARKPOST environment variable is not set", nil)
 	}
 
 	webhookTopicPostmark := os.Getenv("WEBHOOK_TOPIC_POSTMARK")
 	if webhookTopicPostmark == "" {
-		log.Fatal("WEBHOOK_TOPIC_POSTMARK environment variable is not set")
+		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_POSTMARK environment variable is not set", nil)
 	}
 
 	webhookTopicSocketlabs := os.Getenv("WEBHOOK_TOPIC_SOCKETLABS")
 	if webhookTopicSocketlabs == "" {
-		log.Fatal("WEBHOOK_TOPIC_SOCKETLABS environment variable is not set")
+		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_SOCKETLABS environment variable is not set", nil)
 	}
 
 	var producer sarama.SyncProducer
 	var err error
-
-	// Initialize data stores (MySQL+Kafka or DynamoDB)
-	database.InitDataStores()
 
 	// Only initialize Kafka if we're in MySQL+Kafka mode
 	if database.IsMySQLKafkaMode() {
 		// Set up the Kafka producer
 		producer, err = sarama.NewSyncProducer(kafkaBrokers, nil)
 		if err != nil {
-			log.Fatalf("Failed to start Kafka producer: %v", err)
+			logger.Fatal(nil, "main", "Failed to start Kafka producer", err)
 		}
 		defer producer.Close()
 	}
@@ -167,8 +201,12 @@ func main() {
 
 	// Set up the HTTP server for webhooks
 	http.HandleFunc("/webhook-events/sendgrid", func(w http.ResponseWriter, r *http.Request) {
+		// Create request context with ID
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			logger.Error(ctx, "sendgrid-webhook", "Failed to read request body", err)
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
@@ -185,10 +223,15 @@ func main() {
 		}
 
 		if verifyErr != nil {
-			log.Printf("Sendgrid - Failed to verify webhook: %v", verifyErr)
+			logger.Error(ctx, "sendgrid-webhook", "Failed to verify webhook", verifyErr, map[string]interface{}{
+				"user_id": userID,
+			})
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
+
+		// Add user ID to context
+		ctx = logger.WithUserID(ctx, fmt.Sprintf("%d", userID))
 
 		message := Message{
 			Headers: r.Header,
@@ -201,7 +244,7 @@ func main() {
 			// Full mode: Process with MySQL and Kafka
 			var events []json.RawMessage
 			if err := json.Unmarshal(message.Body, &events); err != nil {
-				log.Printf("Failed to unmarshal message body: %v", err)
+				logger.Error(ctx, "sendgrid-webhook", "Failed to unmarshal message body", err)
 				http.Error(w, "Failed to process event payload", http.StatusBadRequest)
 				return
 			}
@@ -209,11 +252,11 @@ func main() {
 			for _, eventData := range events {
 				var sgEventBody SendGridEventBody
 				if err := json.Unmarshal(eventData, &sgEventBody); err != nil {
-					log.Printf("Failed to unmarshal SendGridEventBody: %v", err)
+					logger.Error(ctx, "sendgrid-webhook", "Failed to unmarshal SendGridEventBody", err)
 					continue
 				}
 				if err := associateSendgridEventWithUser(database.GetDB(), sgEventBody, userID); err != nil {
-					log.Printf("Failed to associate event with user: %v", err)
+					logger.Error(ctx, "sendgrid-webhook", "Failed to associate event with user", err)
 					// Continue processing other events
 				}
 			}
@@ -221,11 +264,9 @@ func main() {
 			// Send to Kafka
 			handleRequest(w, producer, os.Getenv("WEBHOOK_TOPIC_SENDGRID"), message)
 		} else {
-			// print userID
-			log.Printf("UserID: %v", userID)
 			// Light mode: Send directly to Splunk
-			if err := sendToSplunkHEC(body, userID); err != nil {
-				log.Printf("Failed to send to Splunk: %v", err)
+			if err := splunkClient.SendEvent(ctx, body, userID); err != nil {
+				logger.Error(ctx, "sendgrid-webhook", "Failed to send to Splunk", err)
 				http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
 				return
 			}
@@ -333,24 +374,31 @@ func main() {
 	})
 
 	http.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+		logger.Info(ctx, "healthcheck", "Health check request received")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "healthy"}`))
 	})
 
 	// Listen on the specified port
-	log.Printf("Listening on port %s...", port)
+	logger.Info(nil, "main", fmt.Sprintf("Listening on port %s...", port))
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
-		log.Fatalf("Failed to start HTTP server: %v", err)
+		logger.Fatal(nil, "main", "Failed to start HTTP server", err)
 	}
 }
 
 func handleRequest(w http.ResponseWriter, producer sarama.SyncProducer, topic string, message Message) {
+	ctx := logger.WithRequestID(context.Background(), uuid.New().String())
+	if message.UserID != 0 {
+		ctx = logger.WithUserID(ctx, fmt.Sprintf("%d", message.UserID))
+	}
+
 	// Serialize the message to JSON
 	messageBytes, err := json.Marshal(message)
 	if err != nil {
+		logger.Error(ctx, "kafka-producer", "Failed to serialize message", err)
 		http.Error(w, "Failed to serialize message", http.StatusInternalServerError)
-		log.Printf("Failed to serialize message: %v", err)
 		return
 	}
 
@@ -361,10 +409,17 @@ func handleRequest(w http.ResponseWriter, producer sarama.SyncProducer, topic st
 	}
 	partition, offset, err := producer.SendMessage(msg)
 	if err != nil {
+		logger.Error(ctx, "kafka-producer", "Failed to send message to Kafka", err)
 		http.Error(w, "Failed to send message to Kafka", http.StatusInternalServerError)
-		log.Printf("Failed to send message to Kafka: %v", err)
 		return
 	}
+
+	// Log success
+	logger.Info(ctx, "kafka-producer", "Message sent to Kafka", map[string]interface{}{
+		"topic":     topic,
+		"partition": partition,
+		"offset":    offset,
+	})
 
 	// Respond to the client
 	response := fmt.Sprintf("Message sent to Kafka topic %s [partition: %d, offset: %d]", topic, partition, offset)

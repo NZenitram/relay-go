@@ -1,10 +1,11 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"os"
+	"relay-go/m/logger"
 	"sync"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -19,6 +20,7 @@ var (
 func InitDB() error {
 	var initErr error
 	once.Do(func() {
+		ctx := context.Background()
 		dbHost := os.Getenv("MYSQL_HOST")
 		dbPort := os.Getenv("MYSQL_PORT")
 		dbUser := os.Getenv("MYSQL_USER")
@@ -49,7 +51,7 @@ func InitDB() error {
 			return
 		}
 
-		log.Println("Successfully connected to the MySQL database")
+		logger.Info(ctx, "mysql", "Successfully connected to the MySQL database")
 	})
 	return initErr
 }
@@ -57,7 +59,7 @@ func InitDB() error {
 // GetDB returns the database connection
 func GetDB() *sql.DB {
 	if db == nil {
-		log.Fatal("Database connection has not been initialized. Call InitDB() first.")
+		logger.Fatal(context.Background(), "mysql", "Database connection has not been initialized. Call InitDB() first.", nil)
 	}
 	return db
 }
@@ -66,6 +68,6 @@ func GetDB() *sql.DB {
 func CloseDB() {
 	if db != nil {
 		db.Close()
-		log.Println("Database connection closed")
+		logger.Info(context.Background(), "mysql", "Database connection closed")
 	}
 }

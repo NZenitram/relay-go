@@ -1,8 +1,9 @@
 package database
 
 import (
+	"context"
 	"fmt"
-	"log"
+	"relay-go/m/logger"
 	"time"
 )
 
@@ -23,21 +24,23 @@ var (
 
 // InitDataStores initializes the appropriate data stores based on availability
 func InitDataStores() error {
+	ctx := context.Background()
+
 	// Initialize Redis first
 	if err := InitRedis(); err != nil {
-		log.Printf("Failed to initialize Redis: %v", err)
+		logger.Warning(ctx, "database", "Failed to initialize Redis", err)
 		// Continue without Redis, we'll fall back to direct DynamoDB access
 	}
 
 	// Try to initialize MySQL
 	if err := InitDB(); err != nil {
-		log.Printf("Failed to initialize MySQL: %v", err)
+		logger.Warning(ctx, "database", "Failed to initialize MySQL", err)
 		// Continue without MySQL
 	}
 
 	// Try to initialize Kafka
 	if err := InitKafka(); err != nil {
-		log.Printf("Failed to initialize Kafka: %v", err)
+		logger.Warning(ctx, "database", "Failed to initialize Kafka", err)
 		// Continue without Kafka
 	}
 
@@ -105,7 +108,8 @@ func tryInitDynamoDB() error {
 
 // CloseDataStores closes all active data store connections
 func CloseDataStores() {
-	log.Println("Closing data store connections...")
+	ctx := context.Background()
+	logger.Info(ctx, "database", "Closing data store connections...")
 
 	switch CurrentDataStore {
 	case MySQLKafka:
@@ -113,10 +117,10 @@ func CloseDataStores() {
 		CloseKafka()
 	case DynamoDB:
 		// DynamoDB doesn't need explicit closing
-		log.Println("DynamoDB connections closed")
+		logger.Info(ctx, "database", "DynamoDB connections closed")
 	}
 
-	log.Println("All data store connections closed")
+	logger.Info(ctx, "database", "All data store connections closed")
 }
 
 // IsMySQLKafkaMode returns true if we're using MySQL + Kafka configuration

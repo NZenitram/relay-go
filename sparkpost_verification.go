@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
+	"relay-go/m/logger"
+	"time"
 )
 
 func verifySparkPostWebhookAndFindUser(db *sql.DB, headers http.Header) (int, int, error) {
 	authHeader := headers.Get("Authorization")
-	log.Printf("Auth Header: %s", authHeader)
+	logger.Info(context.Background(), "sparkpost-verification", "Auth Header", map[string]interface{}{
+		"auth_header": authHeader,
+	})
 
 	username, password, err := decodeBasicAuth(authHeader)
 	if err != nil {
@@ -160,4 +166,68 @@ type SparkPostPayload []struct {
 		MessageEvent *MessageEvent `json:"message_event,omitempty"`
 		TrackEvent   *TrackEvent   `json:"track_event,omitempty"`
 	} `json:"msys"`
+}
+
+type SparkPostVerification struct {
+	httpClient *http.Client
+	apiKey     string
+}
+
+func NewSparkPostVerification(apiKey string) *SparkPostVerification {
+	return &SparkPostVerification{
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+		apiKey: apiKey,
+	}
+}
+
+func (v *SparkPostVerification) VerifyEmail(ctx context.Context, email string) (bool, error) {
+	url := "https://api.sparkpost.com/api/v1/recipient-validation/single"
+
+	body := map[string]string{
+		"email": email,
+	}
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		logger.Error(ctx, "sparkpost-verification", "Failed to marshal request body", err)
+		return false, fmt.Errorf("failed to marshal request body: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+	if err != nil {
+		logger.Error(ctx, "sparkpost-verification", "Failed to create request", err)
+		return false, fmt.Errorf("failed to create request: %v", err)
+	}
+
+	req.Header.Set("Authorization", v.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := v.httpClient.Do(req)
+	if err != nil {
+		logger.Error(ctx, "sparkpost-verification", "Failed to send request", err)
+		return false, fmt.Errorf("failed to send request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		logger.Error(ctx, "sparkpost-verification", "Received non-200 response", fmt.Errorf("status: %d", resp.StatusCode))
+		return false, fmt.Errorf("received non-200 response: %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Results struct {
+			Valid bool `json:"valid"`
+		} `json:"results"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		logger.Error(ctx, "sparkpost-verification", "Failed to decode response", err)
+		return false, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	logger.Info(ctx, "sparkpost-verification", "Email verification completed", map[string]interface{}{
+		"email": email,
+		"valid": result.Results.Valid,
+	})
+	return result.Results.Valid, nil
 }

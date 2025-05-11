@@ -2,8 +2,8 @@ package database
 
 import (
 	"context"
-	"log"
 	"os"
+	"relay-go/m/logger"
 	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,6 +21,7 @@ var (
 func InitDynamoDB() error {
 	var initErr error
 	dynamoOnce.Do(func() {
+		ctx := context.Background()
 		endpoint := os.Getenv("DYNAMODB_ENDPOINT")
 		region := os.Getenv("AWS_REGION")
 		accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
@@ -58,7 +59,7 @@ func InitDynamoDB() error {
 			return
 		}
 
-		log.Println("Successfully connected to DynamoDB")
+		logger.Info(ctx, "dynamodb", "Successfully connected to DynamoDB")
 	})
 	return initErr
 }
@@ -66,7 +67,7 @@ func InitDynamoDB() error {
 // GetDynamoClient returns the DynamoDB client
 func GetDynamoClient() *dynamodb.Client {
 	if dynamoClient == nil {
-		log.Fatal("DynamoDB client has not been initialized. Call InitDynamoDB() first.")
+		logger.Fatal(context.Background(), "dynamodb", "DynamoDB client has not been initialized. Call InitDynamoDB() first.", nil)
 	}
 	return dynamoClient
 }
