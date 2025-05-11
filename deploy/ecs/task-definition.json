@@ -1,0 +1,101 @@
+{
+    "family": "relay-go",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "1024",
+    "memory": "3072",
+    "volumes": [
+        {
+            "name": "redis-data",
+            "efsVolumeConfiguration": {
+                "fileSystemId": "fs-xxxxx",
+                "rootDirectory": "/",
+                "transitEncryption": "ENABLED",
+                "authorizationConfig": {
+                    "accessPointId": "fsap-xxxxx",
+                    "iam": "ENABLED"
+                }
+            }
+        }
+    ],
+    "containerDefinitions": [
+        {
+            "name": "relay-go",
+            "image": "257394459269.dkr.ecr.us-east-2.amazonaws.com/sh-relay-go/sh-relay-go-ingest:latest",
+            "essential": true,
+            "portMappings": [
+                {
+                    "containerPort": 8080,
+                    "protocol": "tcp"
+                }
+            ],
+            "environment": [
+                {
+                    "name": "HTTP_SERVER_PORT",
+                    "value": "8080"
+                },
+                {
+                    "name": "REDIS_HOST",
+                    "value": "localhost"
+                },
+                {
+                    "name": "REDIS_PASSWORD",
+                    "value": "your_password"
+                },
+                {
+                    "name": "DYNAMODB_TABLE_NAME",
+                    "value": "users"
+                },
+                {
+                    "name": "AWS_REGION",
+                    "value": "us-east-2"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/relay-go",
+                    "awslogs-region": "us-east-2",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        },
+        {
+            "name": "redis",
+            "image": "redis:6.2-alpine",
+            "essential": true,
+            "portMappings": [
+                {
+                    "containerPort": 6379,
+                    "protocol": "tcp"
+                }
+            ],
+            "command": [
+                "redis-server",
+                "--requirepass",
+                "your_password",
+                "--dir",
+                "/data",
+                "--appendonly",
+                "yes"
+            ],
+            "mountPoints": [
+                {
+                    "sourceVolume": "redis-data",
+                    "containerPath": "/data",
+                    "readOnly": false
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/relay-go",
+                    "awslogs-region": "us-east-2",
+                    "awslogs-stream-prefix": "redis"
+                }
+            }
+        }
+    ]
+} 
