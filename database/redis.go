@@ -35,7 +35,9 @@ func InitRedis() error {
 	if err != nil {
 		if err.Error() == "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?" {
 			// If we get this specific error, try reconnecting without a password
-			logger.Warning(redisCtx, "redis", "Redis authentication failed, retrying without password", err)
+			logger.Info(redisCtx, "redis", "Redis authentication failed, retrying without password", nil, map[string]interface{}{
+				"error": err.Error(),
+			})
 			redisClient = redis.NewClient(&redis.Options{
 				Addr: redisAddr,
 				DB:   0,
@@ -47,7 +49,7 @@ func InitRedis() error {
 		}
 	}
 
-	logger.Info(redisCtx, "redis", "Successfully connected to Redis")
+	logger.Info(redisCtx, "redis", "Successfully connected to Redis", nil)
 	return nil
 }
 
@@ -63,7 +65,7 @@ func GetRedisClient() *redis.Client {
 func CloseRedis() {
 	if redisClient != nil {
 		redisClient.Close()
-		logger.Info(redisCtx, "redis", "Redis connection closed")
+		logger.Info(redisCtx, "redis", "Redis connection closed", nil)
 	}
 }
 
@@ -85,7 +87,7 @@ func CacheUserData(userID string, userData interface{}) error {
 		return fmt.Errorf("failed to cache user data: %v", err)
 	}
 
-	logger.Info(ctx, "redis", "Successfully cached user data")
+	logger.Info(ctx, "redis", "Successfully cached user data", nil)
 	return nil
 }
 
@@ -97,10 +99,12 @@ func GetCachedUserData(userID string, userData interface{}) (bool, error) {
 	data, err := redisClient.Get(ctx, key).Result()
 	if err != nil {
 		if err == redis.Nil {
-			logger.Info(ctx, "redis", "Cache miss for user data")
+			logger.Info(ctx, "redis", "Cache miss for user data", nil)
 			return false, nil
 		}
-		logger.Error(ctx, "redis", "Failed to get cached user data", err)
+		logger.Debug(ctx, "redis", "Failed to get cached user data", nil, map[string]interface{}{
+			"error": err.Error(),
+		})
 		return false, fmt.Errorf("failed to get cached user data: %v", err)
 	}
 
@@ -110,7 +114,7 @@ func GetCachedUserData(userID string, userData interface{}) (bool, error) {
 		return false, fmt.Errorf("failed to unmarshal cached user data: %v", err)
 	}
 
-	logger.Info(ctx, "redis", "Cache hit for user data")
+	logger.Info(ctx, "redis", "Cache hit for user data", nil)
 	return true, nil
 }
 
@@ -125,6 +129,6 @@ func InvalidateUserCache(userID string) error {
 		return fmt.Errorf("failed to invalidate user cache: %v", err)
 	}
 
-	logger.Info(ctx, "redis", "Successfully invalidated user cache")
+	logger.Info(ctx, "redis", "Successfully invalidated user cache", nil)
 	return nil
 }

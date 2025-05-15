@@ -32,3 +32,6 @@ data/
 postgres/
 
 scripts/
+
+# terraform
+deploy/ecs/terraform/.terraform*

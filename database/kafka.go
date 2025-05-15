@@ -30,7 +30,7 @@ func InitKafka() error {
 			return
 		}
 
-		logger.Info(ctx, "kafka", "Successfully connected to Kafka")
+		logger.Info(ctx, "kafka", "Successfully connected to Kafka", nil)
 	})
 	return initErr
 }
@@ -47,6 +47,6 @@ func GetKafkaClient() sarama.SyncProducer {
 func CloseKafka() {
 	if kafkaClient != nil {
 		kafkaClient.Close()
-		logger.Info(context.Background(), "kafka", "Kafka connection closed")
+		logger.Info(context.Background(), "kafka", "Kafka connection closed", nil)
 	}
 }

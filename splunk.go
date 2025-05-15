@@ -40,7 +40,7 @@ func NewSplunkClient(host, token string) *SplunkClient {
 	}
 }
 
-func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int) error {
+func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int, email string) error {
 	// Unmarshal the data into a slice of maps
 	var events []map[string]interface{}
 	if err := json.Unmarshal(data, &events); err != nil {
@@ -55,7 +55,7 @@ func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int) e
 	for _, event := range events {
 		// Add userID to the event
 		event["user_id"] = userID
-
+		event["sh_username"] = email
 		// Create the request body
 		requestBody := map[string]interface{}{
 			"event": event,
@@ -93,6 +93,6 @@ func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int) e
 		}
 	}
 
-	logger.Info(ctx, "splunk", "Successfully sent all events to Splunk")
+	logger.Info(ctx, "splunk", "Successfully sent all events to Splunk", nil)
 	return nil
 }

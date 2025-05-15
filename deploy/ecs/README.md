@@ -303,3 +303,13 @@ aws efs delete-file-system --file-system-id fs-xxxxx
 # Delete the DynamoDB table
 aws dynamodb delete-table --table-name users
 ``` 
+
+aws dynamodb put-item \
+    --table-name users \
+    --item '{
+        "id": {"N": "5"},
+        "email": {"S": "info@theshcompany.com"},
+        "sendgrid_verification_key": {"S": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEr2ZTHTIgfE02xTr72mfejHh2vLPccnY1HpENM0N0CJ2PA+zEzGtr73Odwpix/R9svSFsySurYIsbZMPs+2CefA=="},
+        "created_at": {"N": "1747085130"},
+        "updated_at": {"N": "1747085130"}
+    }'

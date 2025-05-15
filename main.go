@@ -213,13 +213,14 @@ func main() {
 		defer r.Body.Close()
 
 		var userID int
+		var email string
 		var verifyErr error
 
 		// Check which data store is available and use appropriate verification
 		if database.IsMySQLKafkaMode() {
-			userID, verifyErr = verifySendgridWebhookAndFindUser(database.GetDB(), body, r.Header)
+			userID, email, verifyErr = verifySendgridWebhookAndFindUser(database.GetDB(), body, r.Header)
 		} else {
-			userID, verifyErr = verifySendgridWebhookAndFindUserDynamoDB(database.GetDynamoClient(), body, r.Header)
+			userID, email, verifyErr = verifySendgridWebhookAndFindUserDynamoDB(database.GetDynamoClient(), body, r.Header)
 		}
 
 		if verifyErr != nil {
@@ -237,6 +238,7 @@ func main() {
 			Headers: r.Header,
 			Body:    body,
 			UserID:  userID,
+			Email:   email,
 		}
 
 		// Process events based on available data store
@@ -265,7 +267,7 @@ func main() {
 			handleRequest(w, producer, os.Getenv("WEBHOOK_TOPIC_SENDGRID"), message)
 		} else {
 			// Light mode: Send directly to Splunk
-			if err := splunkClient.SendEvent(ctx, body, userID); err != nil {
+			if err := splunkClient.SendEvent(ctx, body, userID, email); err != nil {
 				logger.Error(ctx, "sendgrid-webhook", "Failed to send to Splunk", err)
 				http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
 				return
@@ -375,7 +377,7 @@ func main() {
 
 	http.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
 		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
-		logger.Info(ctx, "healthcheck", "Health check request received")
+		logger.Info(ctx, "healthcheck", "Health check request received", nil)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "healthy"}`))
@@ -461,6 +463,7 @@ func validateEmailPayload(emailPayload EmailPayload) error {
 
 type Message struct {
 	MessageID string
+	Email     string
 	UserID    int
 	Headers   map[string][]string `json:"headers"`
 	Body      json.RawMessage     `json:"body"`

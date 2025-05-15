@@ -25,28 +25,37 @@ var (
 // InitDataStores initializes the appropriate data stores based on availability
 func InitDataStores() error {
 	ctx := context.Background()
+	var redisErr, dynamoErr error
 
 	// Initialize Redis first
 	if err := InitRedis(); err != nil {
+		redisErr = err
 		logger.Warning(ctx, "database", "Failed to initialize Redis", err)
 		// Continue without Redis, we'll fall back to direct DynamoDB access
 	}
 
 	// Try to initialize MySQL
 	if err := InitDB(); err != nil {
-		logger.Warning(ctx, "database", "Failed to initialize MySQL", err)
+		logger.Error(ctx, "database", "Failed to initialize MySQL", err)
 		// Continue without MySQL
 	}
 
 	// Try to initialize Kafka
 	if err := InitKafka(); err != nil {
-		logger.Warning(ctx, "database", "Failed to initialize Kafka", err)
+		logger.Error(ctx, "database", "Failed to initialize Kafka", err)
 		// Continue without Kafka
 	}
 
 	// Initialize DynamoDB
 	if err := InitDynamoDB(); err != nil {
-		return fmt.Errorf("failed to initialize DynamoDB: %v", err)
+		dynamoErr = err
+		logger.Error(ctx, "database", "Failed to initialize DynamoDB", err)
+	}
+
+	// If both Redis and DynamoDB failed, log a critical error
+	if redisErr != nil && dynamoErr != nil {
+		logger.Error(ctx, "database", "Critical: Both Redis and DynamoDB initialization failed", fmt.Errorf("redis error: %v, dynamodb error: %v", redisErr, dynamoErr))
+		return fmt.Errorf("critical: both Redis and DynamoDB initialization failed: redis error: %v, dynamodb error: %v", redisErr, dynamoErr)
 	}
 
 	return nil
@@ -109,7 +118,7 @@ func tryInitDynamoDB() error {
 // CloseDataStores closes all active data store connections
 func CloseDataStores() {
 	ctx := context.Background()
-	logger.Info(ctx, "database", "Closing data store connections...")
+	logger.Error(ctx, "database", "Closing data store connections...", nil)
 
 	switch CurrentDataStore {
 	case MySQLKafka:
@@ -117,10 +126,10 @@ func CloseDataStores() {
 		CloseKafka()
 	case DynamoDB:
 		// DynamoDB doesn't need explicit closing
-		logger.Info(ctx, "database", "DynamoDB connections closed")
+		logger.Error(ctx, "database", "DynamoDB connections closed", nil)
 	}
 
-	logger.Info(ctx, "database", "All data store connections closed")
+	logger.Error(ctx, "database", "All data store connections closed", nil)
 }
 
 // IsMySQLKafkaMode returns true if we're using MySQL + Kafka configuration

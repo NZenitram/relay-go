@@ -51,7 +51,7 @@ func InitDB() error {
 			return
 		}
 
-		logger.Info(ctx, "mysql", "Successfully connected to the MySQL database")
+		logger.Info(ctx, "mysql", "Successfully connected to the MySQL database", nil)
 	})
 	return initErr
 }
@@ -68,6 +68,6 @@ func GetDB() *sql.DB {
 func CloseDB() {
 	if db != nil {
 		db.Close()
-		logger.Info(context.Background(), "mysql", "Database connection closed")
+		logger.Info(context.Background(), "mysql", "Database connection closed", nil)
 	}
 }

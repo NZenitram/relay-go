@@ -11,20 +11,34 @@ import (
 )
 
 // LogLevel represents the severity level of a log message
-type LogLevel string
+type LogLevel int
 
 const (
-	DEBUG   LogLevel = "DEBUG"
-	INFO    LogLevel = "INFO"
-	WARNING LogLevel = "WARNING"
-	ERROR   LogLevel = "ERROR"
-	FATAL   LogLevel = "FATAL"
+	DEBUG LogLevel = iota
+	INFO
+	WARNING
+	ERROR
+	FATAL
 )
+
+// LogLevelString maps numeric log levels to their string representations
+var LogLevelString = map[LogLevel]string{
+	DEBUG:   "DEBUG",
+	INFO:    "INFO",
+	WARNING: "WARNING",
+	ERROR:   "ERROR",
+	FATAL:   "FATAL",
+}
+
+// String returns the string representation of a LogLevel
+func (l LogLevel) String() string {
+	return LogLevelString[l]
+}
 
 // LogEntry represents a structured log entry
 type LogEntry struct {
 	Timestamp   string                 `json:"timestamp"`
-	Level       LogLevel               `json:"level"`
+	Level       string                 `json:"level"`
 	Message     string                 `json:"message"`
 	RequestID   string                 `json:"request_id,omitempty"`
 	UserID      string                 `json:"user_id,omitempty"`
@@ -69,7 +83,7 @@ func writeLog(ctx context.Context, level LogLevel, component string, message str
 
 	entry := LogEntry{
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
-		Level:       level,
+		Level:       level.String(),
 		Message:     message,
 		RequestID:   requestID,
 		UserID:      userID,

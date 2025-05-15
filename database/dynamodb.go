@@ -59,7 +59,11 @@ func InitDynamoDB() error {
 			return
 		}
 
-		logger.Info(ctx, "dynamodb", "Successfully connected to DynamoDB")
+		if initErr != nil {
+			return
+		}
+
+		logger.Info(ctx, "dynamodb", "Successfully connected to DynamoDB", nil)
 	})
 	return initErr
 }
