@@ -38,18 +38,24 @@ func InitDataStores() error {
 	if err := InitDB(); err != nil {
 		logger.Error(ctx, "database", "Failed to initialize MySQL", err)
 		// Continue without MySQL
-	}
-
-	// Try to initialize Kafka
-	if err := InitKafka(); err != nil {
-		logger.Error(ctx, "database", "Failed to initialize Kafka", err)
-		// Continue without Kafka
+	} else {
+		// Only set MySQLKafka mode if Kafka is also available
+		if err := InitKafka(); err != nil {
+			logger.Error(ctx, "database", "Failed to initialize Kafka", err)
+			// Continue without Kafka
+		} else {
+			CurrentDataStore = MySQLKafka
+			logger.Info(ctx, "database", "Using MySQL + Kafka mode", nil)
+		}
 	}
 
 	// Initialize DynamoDB
 	if err := InitDynamoDB(); err != nil {
 		dynamoErr = err
 		logger.Error(ctx, "database", "Failed to initialize DynamoDB", err)
+	} else if CurrentDataStore == "" {
+		CurrentDataStore = DynamoDB
+		logger.Info(ctx, "database", "Using DynamoDB mode", nil)
 	}
 
 	// If both Redis and DynamoDB failed, log a critical error

@@ -123,6 +123,30 @@ resource "aws_iam_role_policy" "dynamodb_access" {
   })
 }
 
+# S3 access policy
+resource "aws_iam_role_policy" "s3_access" {
+  name = "${var.environment}-relay-go-s3-access"
+  role = aws_iam_role.ecs_task_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.event_batches.arn,
+          "${aws_s3_bucket.event_batches.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
 # ECS Task Definition
 resource "aws_ecs_task_definition" "main" {
   family                   = "${var.environment}-relay-go"
@@ -172,7 +196,7 @@ resource "aws_ecs_task_definition" "main" {
         },
         {
           name  = "REDIS_HOST"
-          value = "127.0.0.1:6379"
+          value = "localhost:6379"
         },
         {
           name  = "DYNAMODB_TABLE_NAME"
@@ -183,16 +207,12 @@ resource "aws_ecs_task_definition" "main" {
           value = var.aws_region
         },
         {
+          name  = "S3_BUCKET_NAME"
+          value = aws_s3_bucket.event_batches.id
+        },
+        {
           name  = "LOG_LEVEL"
           value = "ERROR"
-        },
-        {
-          name  = "SPLUNK_HOST"
-          value = "prd-p-yvj3g"
-        },
-        {
-          name  = "SPLUNK_KEY"
-          value = "9e937222-ad2b-4081-918b-df9e539ccfca"
         },
         {
           name  = "KAFKA_BROKERS"
@@ -243,7 +263,16 @@ resource "aws_ecs_task_definition" "main" {
           value = "disable"
         }
       ]
-      secrets = []
+      secrets = [
+        {
+          name      = "SPLUNK_HOST"
+          valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:splunk_host::"
+        },
+        {
+          name      = "SPLUNK_KEY"
+          valueFrom = "${aws_secretsmanager_secret.app_secrets.arn}:splunk_key::"
+        }
+      ]
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -255,7 +284,7 @@ resource "aws_ecs_task_definition" "main" {
     },
     {
       name      = "redis"
-      image     = "public.ecr.aws/amazonlinux/amazonlinux:2"
+      image     = "redis:7.2-alpine"
       essential = true
       portMappings = [
         {
@@ -272,10 +301,20 @@ resource "aws_ecs_task_definition" "main" {
         }
       ]
       command = [
-        "sh",
-        "-c",
-        "yum update -y && yum install -y python3-pip && pip3 install --no-cache-dir botocore && amazon-linux-extras enable redis6 && yum install -y redis && redis-server --save 20 1 --loglevel warning --dir /data --dbfilename dump.rdb"
+        "redis-server",
+        "--save", "20", "1",
+        "--loglevel", "warning",
+        "--dir", "/data",
+        "--dbfilename", "dump.rdb",
+        "--bind", "0.0.0.0"
       ]
+      healthCheck = {
+        command     = ["CMD", "redis-cli", "ping"]
+        interval    = 30
+        timeout     = 5
+        retries     = 3
+        startPeriod = 60
+      }
       logConfiguration = {
         logDriver = "awslogs"
         options = {

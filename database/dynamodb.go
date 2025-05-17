@@ -27,36 +27,68 @@ func InitDynamoDB() error {
 		accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 		secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 
-		// Load AWS configuration
-		cfg, err := config.LoadDefaultConfig(context.TODO(),
-			config.WithRegion(region),
-		)
-		if err != nil {
-			initErr = err
-			return
-		}
-
-		// If we're using local DynamoDB, use the provided credentials
-		if endpoint != "" {
-			cfg.Credentials = aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(
-				accessKey,
-				secretKey,
-				"", // session token is not needed for local development
-			))
-		}
-
-		// Create DynamoDB client with custom endpoint if provided
-		dynamoClient = dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
-			if endpoint != "" {
-				o.BaseEndpoint = aws.String(endpoint)
+		if os.Getenv("DEV_MODE") == "true" {
+			// force local endpoint and dummy credentials
+			cfg, err := config.LoadDefaultConfig(context.TODO(),
+				config.WithRegion(region),
+				config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
+					accessKey,
+					secretKey,
+					"", // session token is not needed for local development
+				)),
+			)
+			if err != nil {
+				initErr = err
+				return
 			}
-		})
 
-		// Verify connection by listing tables
-		_, err = dynamoClient.ListTables(context.TODO(), &dynamodb.ListTablesInput{})
-		if err != nil {
-			initErr = err
-			return
+			// Create DynamoDB client with custom endpoint if provided
+			dynamoClient = dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+				if endpoint != "" {
+					o.BaseEndpoint = aws.String(endpoint)
+				}
+			})
+
+			// Verify connection by listing tables
+			_, err = dynamoClient.ListTables(context.TODO(), &dynamodb.ListTablesInput{})
+			if err != nil {
+				initErr = err
+				return
+			}
+
+			logger.Info(ctx, "dynamodb", "Using DynamoDB Local (DEV_MODE)", nil)
+		} else {
+			// use real AWS config
+			cfg, err := config.LoadDefaultConfig(context.TODO(),
+				config.WithRegion(region),
+			)
+			if err != nil {
+				initErr = err
+				return
+			}
+
+			// If we're using local DynamoDB, use the provided credentials
+			if endpoint != "" {
+				cfg.Credentials = aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(
+					accessKey,
+					secretKey,
+					"", // session token is not needed for local development
+				))
+			}
+
+			// Create DynamoDB client with custom endpoint if provided
+			dynamoClient = dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+				if endpoint != "" {
+					o.BaseEndpoint = aws.String(endpoint)
+				}
+			})
+
+			// Verify connection by listing tables
+			_, err = dynamoClient.ListTables(context.TODO(), &dynamodb.ListTablesInput{})
+			if err != nil {
+				initErr = err
+				return
+			}
 		}
 
 		if initErr != nil {

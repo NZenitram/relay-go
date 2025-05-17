@@ -29,6 +29,7 @@ type EmailMessage struct {
 	Sections         map[string]string
 	Categories       []string
 }
+
 type Content struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`

@@ -12,6 +12,7 @@ import (
 	"os"
 	"relay-go/m/database"
 	"relay-go/m/logger"
+	"relay-go/m/webhook"
 	"strings"
 
 	"github.com/IBM/sarama"
@@ -19,18 +20,78 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var splunkClient *SplunkClient
+// Config holds all configuration values
+type Config struct {
+	HTTPPort      string
+	KafkaBrokers  []string
+	EmailTopic    string
+	WebhookTopics map[string]string
+	SplunkHost    string
+	SplunkToken   string
+	RedisHost     string
+	LogLevel      string
+}
 
-func init() {
+// loadConfig loads all configuration from environment variables
+func loadConfig() (*Config, error) {
 	envErr := godotenv.Load()
 	if envErr != nil {
 		logger.Info(nil, "init", "No .env file found, using system environment variables")
 	}
 
+	config := &Config{
+		HTTPPort:     os.Getenv("HTTP_SERVER_PORT"),
+		KafkaBrokers: []string{os.Getenv("KAFKA_BROKERS")},
+		EmailTopic:   os.Getenv("EMAIL_TOPIC"),
+		WebhookTopics: map[string]string{
+			"sendgrid":   os.Getenv("WEBHOOK_TOPIC_SENDGRID"),
+			"sparkpost":  os.Getenv("WEBHOOK_TOPIC_SPARKPOST"),
+			"postmark":   os.Getenv("WEBHOOK_TOPIC_POSTMARK"),
+			"socketlabs": os.Getenv("WEBHOOK_TOPIC_SOCKETLABS"),
+		},
+		SplunkHost:  os.Getenv("SPLUNK_HOST"),
+		SplunkToken: os.Getenv("SPLUNK_KEY"),
+		RedisHost:   os.Getenv("REDIS_HOST"),
+		LogLevel:    os.Getenv("LOG_LEVEL"),
+	}
+
+	// Validate required configuration
+	if config.HTTPPort == "" {
+		return nil, fmt.Errorf("HTTP_SERVER_PORT environment variable is not set")
+	}
+	if len(config.KafkaBrokers) == 0 || config.KafkaBrokers[0] == "" {
+		return nil, fmt.Errorf("KAFKA_BROKERS environment variable is not set")
+	}
+	if config.EmailTopic == "" {
+		return nil, fmt.Errorf("EMAIL_TOPIC environment variable is not set")
+	}
+	if config.SplunkHost == "" {
+		return nil, fmt.Errorf("SPLUNK_HOST environment variable is not set")
+	}
+	if config.SplunkToken == "" {
+		return nil, fmt.Errorf("SPLUNK_KEY environment variable is not set")
+	}
+	if config.RedisHost == "" {
+		return nil, fmt.Errorf("REDIS_HOST environment variable is not set")
+	}
+
+	return config, nil
+}
+
+var splunkClient *webhook.SplunkClient
+var webhookHandler *WebhookHandler
+var config *Config
+
+func init() {
+	var err error
+	config, err = loadConfig()
+	if err != nil {
+		logger.Fatal(nil, "init", "Failed to load configuration", err)
+	}
+
 	// Set logger level based on environment
-	logLevel := os.Getenv("LOG_LEVEL")
-	if logLevel != "" {
-		switch logLevel {
+	if config.LogLevel != "" {
+		switch config.LogLevel {
 		case "DEBUG":
 			logger.SetLevel(logger.DEBUG)
 		case "INFO":
@@ -46,94 +107,25 @@ func init() {
 		}
 	}
 
-	redisAddr := os.Getenv("REDIS_HOST")
-	if redisAddr == "" {
-		logger.Fatal(nil, "init", "REDIS_HOST environment variable is not set", nil)
-	}
-
-	// redisPass := os.Getenv("REDIS_PASSWORD")
-	// if redisAddr == "" {
-	// 	log.Fatal("REDIS_HOST environment variable is not set")
-	// }
-
-	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
-	if len(kafkaBrokers) == 0 {
-		logger.Fatal(nil, "init", "KAFKA_BROKERS environment variable is not set", nil)
-	}
-
-	splunkHost := os.Getenv("SPLUNK_HOST")
-	if splunkHost == "" {
-		logger.Fatal(nil, "init", "SPLUNK_HOST environment variable is not set", nil)
-	}
-	splunkToken := os.Getenv("SPLUNK_KEY")
-	if splunkToken == "" {
-		logger.Fatal(nil, "init", "SPLUNK_KEY environment variable is not set", nil)
-	}
-
 	// Initialize data stores
 	if err := database.InitDataStores(); err != nil {
 		logger.Fatal(nil, "init", "Failed to initialize data stores", err)
 	}
 
-	splunkClient = NewSplunkClient(splunkHost, splunkToken)
+	splunkClient = webhook.NewSplunkClient(config.SplunkHost, config.SplunkToken)
 
-	// database.InitDB()
-	// db := database.GetDB()
-	// Initialize your database connection, Redis address, and Kafka brokers
-
-	// var err error
-	// batchProcessor, err = NewBatchProcessor(db, redisAddr, redisPass, kafkaBrokers)
-	// if err != nil {
-	// 	log.Fatalf("Failed to create batch processor: %v", err)
-	// }
-
-	// // Start processing scheduled emails in a separate goroutine
-	// go batchProcessor.ProcessScheduledEmails()
+	// Initialize webhook handler
+	webhookHandler = NewWebhookHandler(database.GetDB(), database.GetDynamoClient())
 }
 
 func main() {
-	port := os.Getenv("HTTP_SERVER_PORT")
-	if port == "" {
-		logger.Fatal(nil, "main", "HTTP_SERVER_PORT environment variable is not set", nil)
-	}
-
-	kafkaBrokers := []string{os.Getenv("KAFKA_BROKERS")}
-	if len(kafkaBrokers) == 0 {
-		logger.Fatal(nil, "main", "KAFKA_BROKERS environment variable is not set", nil)
-	}
-
-	emailTopic := os.Getenv("EMAIL_TOPIC")
-	if emailTopic == "" {
-		logger.Fatal(nil, "main", "EMAIL_TOPIC environment variable is not set", nil)
-	}
-
-	webhookTopicSendGrid := os.Getenv("WEBHOOK_TOPIC_SENDGRID")
-	if webhookTopicSendGrid == "" {
-		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_SENDGRID environment variable is not set", nil)
-	}
-
-	webhookTopicSparkpost := os.Getenv("WEBHOOK_TOPIC_SPARKPOST")
-	if webhookTopicSparkpost == "" {
-		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_SPARKPOST environment variable is not set", nil)
-	}
-
-	webhookTopicPostmark := os.Getenv("WEBHOOK_TOPIC_POSTMARK")
-	if webhookTopicPostmark == "" {
-		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_POSTMARK environment variable is not set", nil)
-	}
-
-	webhookTopicSocketlabs := os.Getenv("WEBHOOK_TOPIC_SOCKETLABS")
-	if webhookTopicSocketlabs == "" {
-		logger.Fatal(nil, "main", "WEBHOOK_TOPIC_SOCKETLABS environment variable is not set", nil)
-	}
-
 	var producer sarama.SyncProducer
 	var err error
 
 	// Only initialize Kafka if we're in MySQL+Kafka mode
 	if database.IsMySQLKafkaMode() {
 		// Set up the Kafka producer
-		producer, err = sarama.NewSyncProducer(kafkaBrokers, nil)
+		producer, err = sarama.NewSyncProducer(config.KafkaBrokers, nil)
 		if err != nil {
 			logger.Fatal(nil, "main", "Failed to start Kafka producer", err)
 		}
@@ -141,7 +133,6 @@ func main() {
 	}
 
 	// Set up the HTTP server for emails
-
 	http.HandleFunc("/emails", func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		apiKey := extractAPIKey(authHeader)
@@ -179,24 +170,6 @@ func main() {
 			http.Error(w, "Failed to store email request", http.StatusInternalServerError)
 			return
 		}
-
-		// message := Message{
-		// 	MessageID: messageID,
-		// 	UserID:    user.ID,
-		// 	Body:      body,
-		// }
-
-		// if emailPayload.CustomArgs["IsBatch"] == "true" {
-		// 	err := batchProcessor.HandleBatchSend(user.ID, message)
-		// 	if err != nil {
-		// 		http.Error(w, fmt.Sprintf("Failed to handle batch send: %v", err), http.StatusInternalServerError)
-		// 		return
-		// 	}
-		// 	w.WriteHeader(http.StatusAccepted)
-		// 	w.Write([]byte(fmt.Sprintf(`{"message": "Batch email processing started", "batch_id": %v}`, messageID)))
-		// } else {
-		// 	handleRequest(w, producer, emailTopic, message)
-		// }
 	})
 
 	// Set up the HTTP server for webhooks
@@ -212,21 +185,8 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		var userID int
-		var email string
-		var verifyErr error
-
-		// Check which data store is available and use appropriate verification
-		if database.IsMySQLKafkaMode() {
-			userID, email, verifyErr = verifySendgridWebhookAndFindUser(database.GetDB(), body, r.Header)
-		} else {
-			userID, email, verifyErr = verifySendgridWebhookAndFindUserDynamoDB(database.GetDynamoClient(), body, r.Header)
-		}
-
-		if verifyErr != nil {
-			logger.Error(ctx, "sendgrid-webhook", "Failed to verify webhook", verifyErr, map[string]interface{}{
-				"user_id": userID,
-			})
+		userID, email, err := webhookHandler.ProcessWebhook(ctx, "sendgrid", body, r.Header)
+		if err != nil {
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
@@ -234,46 +194,35 @@ func main() {
 		// Add user ID to context
 		ctx = logger.WithUserID(ctx, fmt.Sprintf("%d", userID))
 
-		message := Message{
-			Headers: r.Header,
-			Body:    body,
-			UserID:  userID,
-			Email:   email,
+		// Unmarshal the events
+		var events []json.RawMessage
+		if err := json.Unmarshal(body, &events); err != nil {
+			logger.Error(ctx, "sendgrid-webhook", "Failed to unmarshal message body", err)
+			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
+			return
 		}
 
-		// Process events based on available data store
+		// Create appropriate processor based on mode
+		var processor webhook.EventProcessor
 		if database.IsMySQLKafkaMode() {
 			// Full mode: Process with MySQL and Kafka
-			var events []json.RawMessage
-			if err := json.Unmarshal(message.Body, &events); err != nil {
-				logger.Error(ctx, "sendgrid-webhook", "Failed to unmarshal message body", err)
-				http.Error(w, "Failed to process event payload", http.StatusBadRequest)
-				return
-			}
-
-			for _, eventData := range events {
-				var sgEventBody SendGridEventBody
-				if err := json.Unmarshal(eventData, &sgEventBody); err != nil {
-					logger.Error(ctx, "sendgrid-webhook", "Failed to unmarshal SendGridEventBody", err)
-					continue
-				}
-				if err := associateSendgridEventWithUser(database.GetDB(), sgEventBody, userID); err != nil {
-					logger.Error(ctx, "sendgrid-webhook", "Failed to associate event with user", err)
-					// Continue processing other events
-				}
-			}
-
-			// Send to Kafka
-			handleRequest(w, producer, os.Getenv("WEBHOOK_TOPIC_SENDGRID"), message)
+			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["sendgrid"])
 		} else {
-			// Light mode: Send directly to Splunk
-			if err := splunkClient.SendEvent(ctx, body, userID, email); err != nil {
-				logger.Error(ctx, "sendgrid-webhook", "Failed to send to Splunk", err)
-				http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
+			// Light mode: Send to both Splunk and S3
+			processor = webhook.NewCompositeProcessor(
+				webhook.NewSplunkEventProcessor(splunkClient),
+				database.NewEventBatcherProcessor(),
+			)
 		}
+
+		// Process all events
+		if err := webhook.ProcessWebhookEvents(ctx, events, int64(userID), email, processor); err != nil {
+			logger.Error(ctx, "sendgrid-webhook", "Failed to process events", err)
+			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
 	})
 
 	http.HandleFunc("/webhook-events/sparkpost", func(w http.ResponseWriter, r *http.Request) {
@@ -316,7 +265,7 @@ func main() {
 			Body:    body,
 		}
 
-		handleRequest(w, producer, webhookTopicSparkpost, message)
+		handleRequest(w, producer, config.WebhookTopics["sparkpost"], message)
 	})
 
 	http.HandleFunc("/webhook-events/postmark", func(w http.ResponseWriter, r *http.Request) {
@@ -356,7 +305,7 @@ func main() {
 			Body:    body,
 		}
 
-		handleRequest(w, producer, webhookTopicPostmark, message)
+		handleRequest(w, producer, config.WebhookTopics["postmark"], message)
 	})
 
 	http.HandleFunc("/webhook-events/socketlabs", func(w http.ResponseWriter, r *http.Request) {
@@ -372,7 +321,7 @@ func main() {
 			Body:    body,
 		}
 
-		handleRequest(w, producer, webhookTopicSocketlabs, message)
+		handleRequest(w, producer, config.WebhookTopics["socketlabs"], message)
 	})
 
 	http.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
@@ -384,8 +333,8 @@ func main() {
 	})
 
 	// Listen on the specified port
-	logger.Info(nil, "main", fmt.Sprintf("Listening on port %s...", port))
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	logger.Info(nil, "main", fmt.Sprintf("Listening on port %s...", config.HTTPPort))
+	if err := http.ListenAndServe(":"+config.HTTPPort, nil); err != nil {
 		logger.Fatal(nil, "main", "Failed to start HTTP server", err)
 	}
 }

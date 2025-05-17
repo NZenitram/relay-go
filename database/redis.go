@@ -8,7 +8,7 @@ import (
 	"relay-go/m/logger"
 	"time"
 
-	"github.com/go-redis/redis/v8"
+	"github.com/redis/go-redis/v9"
 )
 
 var (

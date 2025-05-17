@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -47,61 +46,125 @@ func NewSendGridVerification(apiKey string) *SendGridVerification {
 	}
 }
 
-func (v *SendGridVerification) VerifyEmail(ctx context.Context, email string) (bool, error) {
-	url := fmt.Sprintf("https://api.sendgrid.com/v3/validations/email", email)
+// func (v *SendGridVerification) VerifyEmail(ctx context.Context, email string) (bool, error) {
+// 	url := fmt.Sprintf("https://api.sendgrid.com/v3/validations/email", email)
 
-	body := map[string]string{
-		"email": email,
-	}
-	jsonBody, err := json.Marshal(body)
-	if err != nil {
-		logger.Error(ctx, "sendgrid-verification", "Failed to marshal request body", err)
-		return false, fmt.Errorf("failed to marshal request body: %v", err)
-	}
+// 	body := map[string]string{
+// 		"email": email,
+// 	}
+// 	jsonBody, err := json.Marshal(body)
+// 	if err != nil {
+// 		logger.Error(ctx, "sendgrid-verification", "Failed to marshal request body", err)
+// 		return false, fmt.Errorf("failed to marshal request body: %v", err)
+// 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		logger.Error(ctx, "sendgrid-verification", "Failed to create request", err)
-		return false, fmt.Errorf("failed to create request: %v", err)
-	}
+// 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonBody))
+// 	if err != nil {
+// 		logger.Error(ctx, "sendgrid-verification", "Failed to create request", err)
+// 		return false, fmt.Errorf("failed to create request: %v", err)
+// 	}
 
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", v.apiKey))
-	req.Header.Set("Content-Type", "application/json")
+// 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", v.apiKey))
+// 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := v.httpClient.Do(req)
-	if err != nil {
-		logger.Error(ctx, "sendgrid-verification", "Failed to send request", err)
-		return false, fmt.Errorf("failed to send request: %v", err)
-	}
-	defer resp.Body.Close()
+// 	resp, err := v.httpClient.Do(req)
+// 	if err != nil {
+// 		logger.Error(ctx, "sendgrid-verification", "Failed to send request", err)
+// 		return false, fmt.Errorf("failed to send request: %v", err)
+// 	}
+// 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		logger.Error(ctx, "sendgrid-verification", "Received non-200 response", fmt.Errorf("status: %d", resp.StatusCode))
-		return false, fmt.Errorf("received non-200 response: %d", resp.StatusCode)
-	}
+// 	if resp.StatusCode != http.StatusOK {
+// 		logger.Error(ctx, "sendgrid-verification", "Received non-200 response", fmt.Errorf("status: %d", resp.StatusCode))
+// 		return false, fmt.Errorf("received non-200 response: %d", resp.StatusCode)
+// 	}
 
-	var result struct {
-		Valid bool `json:"valid"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		logger.Error(ctx, "sendgrid-verification", "Failed to decode response", err)
-		return false, fmt.Errorf("failed to decode response: %v", err)
-	}
+// 	var result struct {
+// 		Valid bool `json:"valid"`
+// 	}
+// 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+// 		logger.Error(ctx, "sendgrid-verification", "Failed to decode response", err)
+// 		return false, fmt.Errorf("failed to decode response: %v", err)
+// 	}
 
-	logger.Info(ctx, "sendgrid-verification", "Email verification completed", map[string]interface{}{
-		"email": email,
-		"valid": result.Valid,
-	})
-	return result.Valid, nil
+// 	logger.Info(ctx, "sendgrid-verification", "Email verification completed", map[string]interface{}{
+// 		"email": email,
+// 		"valid": result.Valid,
+// 	})
+// 	return result.Valid, nil
+// }
+
+// func isMySQLAvailable(db *sql.DB) bool {
+// 	err := db.Ping()
+// 	return err == nil
+// }
+
+type MySQLUser struct {
+	ID                      int    `json:"id"`
+	SendGridVerificationKey string `json:"sendgrid_verification_key"`
+	Email                   string `json:"email"`
+	CreatedAt               int64  `json:"created_at"`
+	UpdatedAt               int64  `json:"updated_at"`
 }
 
-func isMySQLAvailable(db *sql.DB) bool {
-	err := db.Ping()
-	return err == nil
+// Common user data structure for caching
+type UserData struct {
+	ID                      int64  `json:"id"`
+	SendGridVerificationKey string `json:"sendgrid_verification_key"`
+	Email                   string `json:"email"`
+	CreatedAt               int64  `json:"created_at"`
+	UpdatedAt               int64  `json:"updated_at"`
+}
+
+// verifyWebhookSignature verifies the SendGrid webhook signature
+func verifyWebhookSignature(ctx context.Context, verificationKey string, body []byte, signature, timestamp string) (bool, error) {
+	ecdaKey, err := eventwebhook.ConvertPublicKeyBase64ToECDSA(verificationKey)
+	if err != nil {
+		logger.Error(ctx, "sendgrid-verification", "Cannot convert public key", err)
+		return false, fmt.Errorf("cannot convert public key: %v", err)
+	}
+
+	valid, err := eventwebhook.VerifySignature(ecdaKey, body, signature, timestamp)
+	if err != nil {
+		logger.Error(ctx, "sendgrid-verification", "Signature verification failed", err)
+		return false, fmt.Errorf("signature verification failed: %v", err)
+	}
+
+	return valid, nil
+}
+
+// getUserDataFromCache attempts to get user data from cache
+func getUserDataFromCache(ctx context.Context, userID string) (*UserData, bool, error) {
+	var cachedUser UserData
+	cacheHit, err := database.GetCachedUserData(userID, &cachedUser)
+	if err != nil {
+		logger.Info(ctx, "sendgrid-verification", "Cache error for user", nil, map[string]interface{}{
+			"user_id": userID,
+			"error":   err.Error(),
+		})
+		return nil, false, err
+	}
+	if cacheHit {
+		return &cachedUser, true, nil
+	}
+	return nil, false, nil
+}
+
+// cacheUserData stores user data in cache
+func cacheUserData(ctx context.Context, userID string, userData UserData) error {
+	if err := database.CacheUserData(userID, userData); err != nil {
+		log.Printf("Failed to cache user data for ID %s: %v", userID, err)
+		return err
+	}
+	logger.Info(ctx, "sendgrid-verification", "Successfully cached user data", map[string]interface{}{
+		"user_id": userID,
+	})
+	return nil
 }
 
 func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Header) (int, string, error) {
 	ctx := context.Background()
+	logger.Info(ctx, "sendgrid-verification", "Starting MySQL verification", nil)
 	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
 	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
 
@@ -109,54 +172,80 @@ func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Head
 		return 0, "", fmt.Errorf("missing webhook signature or timestamp")
 	}
 
-	// Query all users with SendGrid verification keys
 	rows, err := db.Query(`
-		SELECT id, sendgrid_verification_key
+		SELECT id, sendgrid_verification_key, email, UNIX_TIMESTAMP(created_at), UNIX_TIMESTAMP(updated_at)
 		FROM users
 		WHERE sendgrid_verification_key IS NOT NULL
 	`)
 	if err != nil {
+		logger.Error(ctx, "sendgrid-verification", "MySQL query failed", err)
 		return 0, "", fmt.Errorf("database query failed: %v", err)
 	}
 	defer rows.Close()
 
+	var foundUsers int
 	for rows.Next() {
+		foundUsers++
 		var userID int
 		var verificationKey string
-		if err := rows.Scan(&userID, &verificationKey); err != nil {
-			log.Printf("Failed to scan user row: %v", err)
+		var email string
+		var createdAt, updatedAt int64
+		if err := rows.Scan(&userID, &verificationKey, &email, &createdAt, &updatedAt); err != nil {
+			logger.Error(ctx, "sendgrid-verification", "Failed to scan MySQL user row", err)
 			continue
 		}
 
-		ecdaKey, err := eventwebhook.ConvertPublicKeyBase64ToECDSA(verificationKey)
-		if err != nil {
-			logger.Error(ctx, "sendgrid-verification", "Cannot convert public key", err, map[string]interface{}{
-				"user_id": userID,
+		logger.Info(ctx, "sendgrid-verification", "Checking MySQL user", map[string]interface{}{
+			"user_id": userID,
+			"email":   email,
+		})
+
+		// Try to get user data from cache
+		cachedUser, cacheHit, err := getUserDataFromCache(ctx, fmt.Sprintf("%d", userID))
+		if err == nil && cacheHit {
+			verificationKey = cachedUser.SendGridVerificationKey
+			logger.Info(ctx, "sendgrid-verification", "Using cached verification key for MySQL user", map[string]interface{}{
+				"user_id":   userID,
+				"cache_hit": true,
 			})
-			continue
+		} else {
+			// Cache miss or error, store in cache
+			userData := UserData{
+				ID:                      int64(userID),
+				SendGridVerificationKey: verificationKey,
+				Email:                   email,
+				CreatedAt:               createdAt,
+				UpdatedAt:               updatedAt,
+			}
+			if err := cacheUserData(ctx, fmt.Sprintf("%d", userID), userData); err != nil {
+				logger.Error(ctx, "sendgrid-verification", "Failed to cache MySQL user data", err)
+			}
 		}
 
-		valid, err := eventwebhook.VerifySignature(ecdaKey, body, signature, timestamp)
+		valid, err := verifyWebhookSignature(ctx, verificationKey, body, signature, timestamp)
 		if err != nil {
-			log.Printf("Signature verification failed for user ID %d: %v", userID, err)
+			logger.Error(ctx, "sendgrid-verification", "MySQL user verification failed", err)
 			continue
 		}
 
 		if valid {
-			var email string
-			err := db.QueryRow("SELECT email FROM users WHERE id = ?", userID).Scan(&email)
-			if err != nil {
-				return 0, "", fmt.Errorf("failed to fetch email for user %d: %v", userID, err)
-			}
+			logger.Info(ctx, "sendgrid-verification", "Found valid MySQL user", map[string]interface{}{
+				"user_id": userID,
+				"email":   email,
+			})
 			return userID, email, nil
 		}
 	}
 
+	logger.Info(ctx, "sendgrid-verification", "MySQL verification complete", map[string]interface{}{
+		"users_checked": foundUsers,
+	})
 	return 0, "", fmt.Errorf("no matching user found for the given webhook signature: %v", signature)
 }
 
 func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []byte, headers http.Header) (int, string, error) {
 	ctx := context.Background()
+	logger.Info(ctx, "sendgrid-verification", "Starting DynamoDB verification", nil)
 	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
 	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
 
@@ -164,17 +253,21 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 		return 0, "", fmt.Errorf("missing webhook signature or timestamp")
 	}
 
-	// Query all users with SendGrid verification keys
 	result, err := client.Scan(context.TODO(), &dynamodb.ScanInput{
 		TableName:        aws.String("users"),
 		FilterExpression: aws.String("attribute_exists(sendgrid_verification_key)"),
 	})
 	if err != nil {
+		logger.Error(ctx, "sendgrid-verification", "DynamoDB scan failed", err)
 		return 0, "", fmt.Errorf("dynamodb scan failed: %v", err)
 	}
 
+	logger.Info(ctx, "sendgrid-verification", "DynamoDB scan results", map[string]interface{}{
+		"items_found": len(result.Items),
+	})
+
 	for _, item := range result.Items {
-		// Safely get the ID value, handling both string and numeric types
+		// Get user ID
 		var userID string
 		switch idValue := item["id"].(type) {
 		case *types.AttributeValueMemberN:
@@ -182,95 +275,84 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 		case *types.AttributeValueMemberS:
 			userID = idValue.Value
 		default:
-			log.Printf("Unexpected ID type for item: %v", item)
+			logger.Error(ctx, "sendgrid-verification", "Unexpected ID type for DynamoDB item", nil)
 			continue
 		}
 
 		verificationKey := item["sendgrid_verification_key"].(*types.AttributeValueMemberS).Value
+		email := item["email"].(*types.AttributeValueMemberS).Value
 
-		// Try to get user data from cache first
-		var cachedUser DynamoDBUser
-		cacheHit, err := database.GetCachedUserData(userID, &cachedUser)
-		if err != nil {
-			logger.Info(ctx, "sendgrid-verification", "Cache error for user", nil, map[string]interface{}{
-				"user_id": userID,
-				"error":   err.Error(),
-			})
-			// Continue with DynamoDB data if cache fails
-		} else if cacheHit {
-			// Use cached verification key
+		logger.Info(ctx, "sendgrid-verification", "Checking DynamoDB user", map[string]interface{}{
+			"user_id": userID,
+			"email":   email,
+		})
+
+		// Try to get user data from cache
+		cachedUser, cacheHit, err := getUserDataFromCache(ctx, userID)
+		if err == nil && cacheHit {
 			verificationKey = cachedUser.SendGridVerificationKey
-		} else {
-			logger.Info(ctx, "sendgrid-verification", "Cache miss for user, storing in cache", nil, map[string]interface{}{
-				"user_id": userID,
+			logger.Info(ctx, "sendgrid-verification", "Using cached verification key for DynamoDB user", map[string]interface{}{
+				"user_id":   userID,
+				"cache_hit": true,
 			})
-			// Cache miss, store user data in cache
-			userData := DynamoDBUser{
+		} else {
+			// Cache miss or error, store in cache
+			userData := UserData{
 				ID:                      parseNumericID(userID),
 				SendGridVerificationKey: verificationKey,
-				Email:                   item["email"].(*types.AttributeValueMemberS).Value,
+				Email:                   email,
 				CreatedAt:               parseTimestamp(item["created_at"].(*types.AttributeValueMemberN).Value),
 				UpdatedAt:               parseTimestamp(item["updated_at"].(*types.AttributeValueMemberN).Value),
 			}
-			if err := database.CacheUserData(userID, userData); err != nil {
-				log.Printf("Failed to cache user data for ID %s: %v", userID, err)
-				// Continue with DynamoDB data if caching fails
-			} else {
-				logger.Info(ctx, "sendgrid-verification", "Successfully cached user data", map[string]interface{}{
-					"user_id": userID,
-				})
+			if err := cacheUserData(ctx, userID, userData); err != nil {
+				logger.Error(ctx, "sendgrid-verification", "Failed to cache DynamoDB user data", err)
 			}
 		}
 
-		ecdaKey, err := eventwebhook.ConvertPublicKeyBase64ToECDSA(verificationKey)
+		valid, err := verifyWebhookSignature(ctx, verificationKey, body, signature, timestamp)
 		if err != nil {
-			logger.Error(ctx, "sendgrid-verification", "Cannot convert public key", err, map[string]interface{}{
-				"user_id": userID,
-			})
-			continue
-		}
-
-		valid, err := eventwebhook.VerifySignature(ecdaKey, body, signature, timestamp)
-		if err != nil {
-			log.Printf("Signature verification failed for user ID %s: %v", userID, err)
+			logger.Error(ctx, "sendgrid-verification", "DynamoDB user verification failed", err)
 			continue
 		}
 
 		if valid {
-			// Convert string ID to int
+			logger.Info(ctx, "sendgrid-verification", "Found valid DynamoDB user", map[string]interface{}{
+				"user_id": userID,
+				"email":   email,
+			})
 			userIDInt, err := strconv.Atoi(userID)
 			if err != nil {
-				log.Printf("Invalid user ID format for %s: %v", userID, err)
+				logger.Error(ctx, "sendgrid-verification", "Invalid user ID format", err)
 				return 0, "", fmt.Errorf("invalid user ID format for %s: %v", userID, err)
 			}
-			email := item["email"].(*types.AttributeValueMemberS).Value
 			return userIDInt, email, nil
 		}
 	}
 
+	logger.Info(ctx, "sendgrid-verification", "DynamoDB verification complete", nil)
 	return 0, "", fmt.Errorf("no matching user found for the given webhook signature: %v", signature)
 }
 
-func associateSendgridEventWithUser(db *sql.DB, sgEventBody SendGridEventBody, userID int) error {
-	// Only attempt MySQL operations if MySQL is available
-	if !isMySQLAvailable(db) {
-		return nil
-	}
+// func associateSendgridEventWithUser(db *sql.DB, sgEventBody SendGridEventBody, userID int) error {
+// 	// Only attempt MySQL operations if MySQL is available
+// 	if !isMySQLAvailable(db) {
+// 		return nil
+// 	}
 
-	// Insert the association into the message_user_associations table
-	_, err := db.Exec(`
-		INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
-		SELECT ?, ?, esp_id, 'sendgrid'
-		FROM email_service_providers
-		WHERE user_id = ? AND provider_name = 'sendgrid'
-		ON DUPLICATE KEY UPDATE id = id
-`, sgEventBody.SGMessageID, userID, userID)
-	if err != nil {
-		return fmt.Errorf("failed to insert message association: %v", err)
-	}
+// 	// Insert the association into the message_user_associations table
+// 	_, err := db.Exec(`
+// 		INSERT INTO message_user_associations (message_id, user_id, esp_id, provider)
+// 		SELECT ?, ?, esp_id, 'sendgrid'
+// 		FROM email_service_providers
+// 		WHERE user_id = ? AND provider_name = 'sendgrid'
+// 		ON DUPLICATE KEY UPDATE id = id
+// `, sgEventBody.SGMessageID, userID, userID)
+// 	if err != nil {
+// 		return fmt.Errorf("failed to insert message association: %v", err)
+// 	}
 
-	return nil
-}
+// 	return nil
+// }
 
 type SendGridEventBody struct {
 	Email         string   `json:"email"`

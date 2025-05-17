@@ -63,3 +63,9 @@ variable "redis_password" {
   type        = string
   sensitive   = true
 } 
+
+variable "s3_retention_days" {
+  description = "Number of days to retain event batches in S3"
+  type        = number
+  default     = 90
+}
