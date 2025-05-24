@@ -40,7 +40,7 @@ func NewSplunkClient(host, token string) *SplunkClient {
 	}
 }
 
-func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int, email string) error {
+func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int, email string, provider string) error {
 	// Unmarshal the data into a slice of maps
 	var events []map[string]interface{}
 	if err := json.Unmarshal(data, &events); err != nil {
@@ -56,6 +56,8 @@ func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int, e
 		// Add userID to the event
 		event["user_id"] = userID
 		event["sh_username"] = email
+		event["provider"] = provider
+
 		// Create the request body
 		requestBody := map[string]interface{}{
 			"event": event,

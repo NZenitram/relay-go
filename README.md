@@ -340,3 +340,25 @@ Contributions are welcome! Please submit a pull request or create an issue for a
 aws ecr get-login-password --region us-east-2 | docker login --username AWS --password-stdin 257394459269.dkr.ecr.us-east-2.amazonaws.com
 docker tag relay-go:latest 257394459269.dkr.ecr.us-east-2.amazonaws.com/sh-consulting/relay-go:latest
 docker push 257394459269.dkr.ecr.us-east-2.amazonaws.com/sh-consulting/relay-go:latest
+
+
+```
+# First, atomically increment the counter and get the new ID
+aws dynamodb update-item \
+  --table-name production-id-counter \
+  --key '{"counter_name": {"S": "user_id"}}' \
+  --update-expression "ADD current_value :inc" \
+  --expression-attribute-values '{":inc": {"N": "1"}}' \
+  --return-values UPDATED_NEW
+
+# Then use the returned ID to create the user
+aws dynamodb put-item \
+  --table-name users \
+  --item '{
+    "id": {"N": "8"},
+    "email": {"S": "matthew.simpson2@sh-email.com"},
+    "sendgrid_verification_key": {"S": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/uhoEqKTdq2vESSPbe08UuH3RVVUwyJOXckuFxllsK0CoUk4x1XGzSmvBjWDtZZ18bYB+Pud/7DydfS+wc/GSA=="},
+    "created_at": {"N": "1716336000"},
+    "updated_at": {"N": "1716336000"}
+  }'
+  ```

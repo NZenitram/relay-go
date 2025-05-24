@@ -32,11 +32,22 @@ func (h *WebhookHandler) ProcessWebhook(ctx context.Context, provider string, bo
 	var email string
 	var verifyErr error
 
-	// Verify webhook and find user based on the data store mode
-	if database.IsMySQLKafkaMode() {
-		userID, email, verifyErr = verifySendgridWebhookAndFindUser(h.db, body, headers)
-	} else {
-		userID, email, verifyErr = verifySendgridWebhookAndFindUserDynamoDB(h.dynamoDB, body, headers)
+	// Verify webhook and find user based on the provider and data store mode
+	switch provider {
+	case "sendgrid":
+		if database.IsMySQLKafkaMode() {
+			userID, email, verifyErr = verifySendgridWebhookAndFindUser(h.db, body, headers)
+		} else {
+			userID, email, verifyErr = verifySendgridWebhookAndFindUserDynamoDB(h.dynamoDB, body, headers)
+		}
+	case "sparkpost":
+		if database.IsMySQLKafkaMode() {
+			userID, _, verifyErr = verifySparkPostWebhookAndFindUser(h.db, headers)
+		} else {
+			userID, email, verifyErr = verifySparkPostWebhookAndFindUserDynamoDB(h.dynamoDB, headers)
+		}
+	default:
+		return 0, "", fmt.Errorf("unsupported provider: %s", provider)
 	}
 
 	if verifyErr != nil {

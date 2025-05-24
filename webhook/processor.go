@@ -53,18 +53,20 @@ func (p *KafkaEventProcessor) ProcessEvent(ctx context.Context, event json.RawMe
 // SplunkEventProcessor handles events using Splunk
 type SplunkEventProcessor struct {
 	splunkClient *SplunkClient
+	provider     string
 }
 
 // NewSplunkEventProcessor creates a new Splunk event processor
-func NewSplunkEventProcessor(splunkClient *SplunkClient) *SplunkEventProcessor {
+func NewSplunkEventProcessor(splunkClient *SplunkClient, provider string) *SplunkEventProcessor {
 	return &SplunkEventProcessor{
 		splunkClient: splunkClient,
+		provider:     provider,
 	}
 }
 
 // ProcessEvent implements EventProcessor for Splunk
 func (p *SplunkEventProcessor) ProcessEvent(ctx context.Context, event json.RawMessage, userID int64, email string) error {
-	return p.splunkClient.SendEvent(ctx, event, int(userID), email)
+	return p.splunkClient.SendEvent(ctx, event, int(userID), email, p.provider)
 }
 
 // Message represents a webhook event message

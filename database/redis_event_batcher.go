@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"relay-go/m/logger"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,7 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -42,11 +43,11 @@ type BatchMetadata struct {
 
 // EventBatch represents a batch of events for S3 storage
 type EventBatch struct {
-	BatchID   string         `json:"batch_id"`
-	Provider  string         `json:"provider"`
-	Timestamp time.Time      `json:"timestamp"`
-	Events    []WebhookEvent `json:"events"`
-	Metadata  BatchMetadata  `json:"metadata"`
+	BatchID   string            `json:"batch_id"`
+	Provider  string            `json:"provider"`
+	Timestamp time.Time         `json:"timestamp"`
+	Events    []json.RawMessage `json:"events"` // Changed to store raw JSON
+	Metadata  BatchMetadata     `json:"metadata"`
 }
 
 // WebhookEvent represents a single webhook event
@@ -67,9 +68,11 @@ type WebhookEvent struct {
 	SMTPID    string `json:"smtp_id"`    // SMTP ID if available
 
 	// Event details
-	Categories []string `json:"categories"` // Categories/tags associated with the event
-	Reason     string   `json:"reason"`     // Reason for bounces/failures
-	ErrorCode  string   `json:"error_code"` // Error code if applicable
+	Categories           []string `json:"categories"`            // Categories/tags associated with the event
+	Reason               string   `json:"reason"`                // Reason for bounces/failures
+	ErrorCode            string   `json:"error_code"`            // Error code if applicable
+	BounceType           string   `json:"bounce_type"`           // Type of bounce (hard, soft, etc.)
+	BounceClassification string   `json:"bounce_classification"` // Detailed bounce classification
 
 	// Location and device info
 	IPAddress string `json:"ip_address"` // IP address of the event
@@ -185,35 +188,66 @@ func NewEventBatcher(redisClient *redis.Client, s3Client *s3.Client, config Batc
 }
 
 // AddEvent adds an event to the batch
-func (b *EventBatcher) AddEvent(ctx context.Context, event WebhookEvent) error {
+func (b *EventBatcher) AddEvent(ctx context.Context, event json.RawMessage, provider string, userID int64, email string) error {
+	logger.Info(ctx, "event-batcher", "Adding event to Redis", map[string]interface{}{
+		"provider": provider,
+		"user_id":  userID,
+		"email":    email,
+	})
+
+	// Inject sh_username into the raw JSON
+	var eventMap map[string]interface{}
+	if err := json.Unmarshal(event, &eventMap); err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to unmarshal event", err)
+		return fmt.Errorf("failed to unmarshal event: %w", err)
+	}
+
+	// Add sh_username to the event
+	eventMap["sh_username"] = email
+
+	// Marshal back to JSON
+	modifiedEvent, err := json.Marshal(eventMap)
+	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to marshal modified event", err)
+		return fmt.Errorf("failed to marshal modified event: %w", err)
+	}
+
 	// Check Redis memory usage
 	info, err := b.redisClient.Info(ctx, "memory").Result()
 	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to get Redis memory info", err)
 		return fmt.Errorf("failed to get Redis memory info: %w", err)
 	}
 
 	// Parse memory usage
 	var usedMemory int64
 	fmt.Sscanf(info, "used_memory:%d", &usedMemory)
+	logger.Info(ctx, "event-batcher", "Redis memory usage", map[string]interface{}{
+		"used_memory": usedMemory,
+		"threshold":   b.config.MemoryThreshold,
+	})
+
 	if usedMemory > int64(b.config.MemoryThreshold) {
+		logger.Info(ctx, "event-batcher", "Memory threshold exceeded, forcing batch commit", map[string]interface{}{
+			"used_memory": usedMemory,
+			"threshold":   b.config.MemoryThreshold,
+		})
 		// Force commit if memory threshold is exceeded
-		if err := b.ProcessBatch(ctx, b.config.Provider); err != nil {
+		if err := b.ProcessBatch(ctx, provider, userID); err != nil {
+			logger.Error(ctx, "event-batcher", "Failed to process batch due to memory threshold", err)
 			return fmt.Errorf("failed to process batch due to memory threshold: %w", err)
 		}
 	}
 
-	// Store event in Redis hash
-	eventKey := fmt.Sprintf("provider:%s:events", b.config.Provider)
-	eventJSON, err := json.Marshal(event)
-	if err != nil {
-		return fmt.Errorf("failed to marshal event: %w", err)
-	}
+	// Store event in Redis hash with userID in the key
+	eventKey := fmt.Sprintf("provider:%s:user:%d:events", provider, userID)
 
-	// Get the next sequence number for this provider using a timestamp-based sequence
+	// Get the next sequence number for this provider/user combination
 	now := time.Now()
-	seqKey := fmt.Sprintf("provider:%s:sequence:%s", b.config.Provider, now.Format("20060102"))
+	seqKey := fmt.Sprintf("provider:%s:user:%d:sequence:%s", provider, userID, now.Format("20060102"))
 	seq, err := b.redisClient.Incr(ctx, seqKey).Result()
 	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to increment sequence", err)
 		return fmt.Errorf("failed to increment sequence: %w", err)
 	}
 
@@ -225,40 +259,78 @@ func (b *EventBatcher) AddEvent(ctx context.Context, event WebhookEvent) error {
 
 	// Use timestamp-based sequence as hash field
 	fieldKey := fmt.Sprintf("%d_%d", now.Unix(), seq)
-	err = b.redisClient.HSet(ctx, eventKey, fieldKey, eventJSON).Err()
+
+	// Store both the event and its userID
+	eventData := struct {
+		Event  json.RawMessage `json:"event"`
+		UserID int64           `json:"user_id"`
+	}{
+		Event:  modifiedEvent,
+		UserID: userID,
+	}
+
+	eventDataJSON, err := json.Marshal(eventData)
 	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to marshal event data", err)
+		return fmt.Errorf("failed to marshal event data: %w", err)
+	}
+
+	err = b.redisClient.HSet(ctx, eventKey, fieldKey, string(eventDataJSON)).Err()
+	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to store event in Redis", err)
 		return fmt.Errorf("failed to store event in Redis: %w", err)
 	}
 
 	// Update metadata
-	metadataKey := fmt.Sprintf("provider:%s:metadata", b.config.Provider)
+	metadataKey := fmt.Sprintf("provider:%s:user:%d:metadata", provider, userID)
 	pipe := b.redisClient.Pipeline()
 	pipe.HIncrBy(ctx, metadataKey, "event_count", 1)
 	pipe.HSet(ctx, metadataKey, "batch_start_time", now.Unix())
 	_, err = pipe.Exec(ctx)
 	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to update metadata", err)
 		return fmt.Errorf("failed to update metadata: %w", err)
 	}
 
 	// Clean up old sequence keys (older than 24 hours)
-	oldSeqKey := fmt.Sprintf("provider:%s:sequence:%s", b.config.Provider, now.Add(-24*time.Hour).Format("20060102"))
+	oldSeqKey := fmt.Sprintf("provider:%s:user:%d:sequence:%s", provider, userID, now.Add(-24*time.Hour).Format("20060102"))
 	b.redisClient.Del(ctx, oldSeqKey)
+
+	logger.Info(ctx, "event-batcher", "Successfully added event to Redis", map[string]interface{}{
+		"provider":  provider,
+		"user_id":   userID,
+		"email":     email,
+		"event_key": eventKey,
+		"field_key": fieldKey,
+	})
 
 	return nil
 }
 
 // ProcessBatch processes and uploads a batch of events to S3
-func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string) error {
-	// Get all events from Redis
-	eventKey := fmt.Sprintf("provider:%s:events", provider)
+func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string, userID int64) error {
+	// Get all events from Redis for this provider/user combination
+	eventKey := fmt.Sprintf("provider:%s:user:%d:events", provider, userID)
 	events, err := b.redisClient.HGetAll(ctx, eventKey).Result()
 	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to get events from Redis", err, map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+			"key":      eventKey,
+		})
 		return fmt.Errorf("failed to get events from Redis: %w", err)
 	}
+
+	logger.Info(ctx, "event-batcher", "Retrieved events from Redis", map[string]interface{}{
+		"provider": provider,
+		"user_id":  userID,
+		"count":    len(events),
+	})
 
 	if len(events) == 0 {
 		logger.Info(ctx, "event-batcher", "No events to commit", map[string]interface{}{
 			"provider": provider,
+			"user_id":  userID,
 		})
 		return nil
 	}
@@ -266,26 +338,37 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string) error 
 	// Create batch ID
 	batchID := fmt.Sprintf("%s_%s_batch%d", provider, time.Now().Format("20060102150405"), time.Now().UnixNano())
 
-	// Convert events to WebhookEvent structs
-	var webhookEvents []WebhookEvent
+	// Convert events to raw JSON
+	var rawEvents []json.RawMessage
 	for _, eventJSON := range events {
-		var event WebhookEvent
-		if err := json.Unmarshal([]byte(eventJSON), &event); err != nil {
-			logger.Error(ctx, "event-batcher", "Failed to unmarshal event", err, map[string]interface{}{
+		var eventData struct {
+			Event  json.RawMessage `json:"event"`
+			UserID int64           `json:"user_id"`
+		}
+		if err := json.Unmarshal([]byte(eventJSON), &eventData); err != nil {
+			logger.Error(ctx, "event-batcher", "Failed to unmarshal event data", err, map[string]interface{}{
 				"provider": provider,
-				"batch_id": batchID,
+				"user_id":  userID,
+				"event":    eventJSON,
 			})
 			continue
 		}
-		webhookEvents = append(webhookEvents, event)
+		rawEvents = append(rawEvents, eventData.Event)
 	}
+
+	logger.Info(ctx, "event-batcher", "Processed events for batch", map[string]interface{}{
+		"provider":    provider,
+		"user_id":     userID,
+		"batch_id":    batchID,
+		"event_count": len(rawEvents),
+	})
 
 	// Create batch metadata
 	metadata := BatchMetadata{
 		BatchID:    batchID,
 		Provider:   provider,
 		Timestamp:  time.Now(),
-		EventCount: len(webhookEvents),
+		EventCount: len(rawEvents),
 		Status:     "processing",
 	}
 
@@ -294,13 +377,18 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string) error 
 		BatchID:   batchID,
 		Provider:  provider,
 		Timestamp: time.Now(),
-		Events:    webhookEvents,
+		Events:    rawEvents,
 		Metadata:  metadata,
 	}
 
 	// Marshal batch to JSON
 	batchJSON, err := json.Marshal(batch)
 	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to marshal batch", err, map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+			"batch_id": batchID,
+		})
 		return fmt.Errorf("failed to marshal batch: %w", err)
 	}
 
@@ -310,19 +398,31 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string) error 
 
 	// Generate S3 key with provider/date/hour structure
 	now := time.Now()
-	s3Key := fmt.Sprintf("events/%s/%04d/%02d/%02d/%02d/events_%s_%s.json",
+	s3Key := fmt.Sprintf("events/user_%d/%s/%04d/%02d/%02d/%02d/events_%s_%s.json",
+		userID,
 		provider,
 		now.Year(), now.Month(), now.Day(), now.Hour(),
 		now.Format("20060102150405"),
 		batchID,
 	)
 
+	logger.Info(ctx, "event-batcher", "Preparing to upload batch to S3", map[string]interface{}{
+		"provider":  provider,
+		"user_id":   userID,
+		"batch_id":  batchID,
+		"s3_key":    s3Key,
+		"file_size": len(batchJSON),
+		"checksum":  checksum,
+		"dev_mode":  os.Getenv("DEV_MODE"),
+	})
+
 	// In DEV_MODE, just log the events instead of uploading to S3
 	if os.Getenv("DEV_MODE") == "true" {
 		logger.Info(ctx, "event-batcher", "DEV_MODE: Would upload batch to S3", map[string]interface{}{
 			"provider":  provider,
+			"user_id":   userID,
 			"batch_id":  batchID,
-			"events":    len(webhookEvents),
+			"events":    len(rawEvents),
 			"s3_key":    s3Key,
 			"file_size": len(batchJSON),
 			"checksum":  checksum,
@@ -339,11 +439,22 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string) error 
 			metadata.Status = "failed"
 			logger.Error(ctx, "event-batcher", "Failed to upload batch to S3", err, map[string]interface{}{
 				"provider": provider,
+				"user_id":  userID,
 				"batch_id": batchID,
 				"s3_key":   s3Key,
+				"bucket":   b.bucketName,
 			})
 			return fmt.Errorf("failed to upload batch to S3: %w", err)
 		}
+
+		logger.Info(ctx, "event-batcher", "Successfully uploaded batch to S3", map[string]interface{}{
+			"provider":  provider,
+			"user_id":   userID,
+			"batch_id":  batchID,
+			"s3_key":    s3Key,
+			"bucket":    b.bucketName,
+			"file_size": len(batchJSON),
+		})
 	}
 
 	// Update metadata with success status and file size
@@ -356,27 +467,47 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string) error 
 	if err != nil {
 		logger.Error(ctx, "event-batcher", "Failed to clear events from Redis", err, map[string]interface{}{
 			"provider": provider,
+			"user_id":  userID,
 			"batch_id": batchID,
+			"key":      eventKey,
+		})
+	} else {
+		logger.Info(ctx, "event-batcher", "Cleared events from Redis", map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+			"batch_id": batchID,
+			"key":      eventKey,
 		})
 	}
 
 	// Clear metadata
-	metadataKey := fmt.Sprintf("provider:%s:metadata", provider)
+	metadataKey := fmt.Sprintf("provider:%s:user:%d:metadata", provider, userID)
 	err = b.redisClient.Del(ctx, metadataKey).Err()
 	if err != nil {
 		logger.Error(ctx, "event-batcher", "Failed to clear metadata from Redis", err, map[string]interface{}{
 			"provider": provider,
+			"user_id":  userID,
 			"batch_id": batchID,
+			"key":      metadataKey,
+		})
+	} else {
+		logger.Info(ctx, "event-batcher", "Cleared metadata from Redis", map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+			"batch_id": batchID,
+			"key":      metadataKey,
 		})
 	}
 
 	logger.Info(ctx, "event-batcher", "Successfully committed batch", map[string]interface{}{
 		"provider":  provider,
+		"user_id":   userID,
 		"batch_id":  batchID,
-		"events":    len(webhookEvents),
+		"events":    len(rawEvents),
 		"s3_key":    s3Key,
 		"file_size": len(batchJSON),
 		"checksum":  checksum,
+		"status":    metadata.Status,
 	})
 
 	return nil
@@ -384,17 +515,73 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string) error 
 
 // StartBatchWorker starts the background worker for batch processing
 func (b *EventBatcher) StartBatchWorker(ctx context.Context) {
+	logger.Info(ctx, "event-batcher", "Starting batch worker", map[string]interface{}{
+		"flush_interval": b.config.FlushInterval,
+		"max_size":       b.config.MaxSize,
+		"max_bytes":      b.config.MaxBytes,
+		"provider":       b.config.Provider,
+	})
+
 	ticker := time.NewTicker(b.config.FlushInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			logger.Info(ctx, "event-batcher", "Batch worker shutting down")
 			return
 		case <-ticker.C:
-			// Process all batches for the current provider
-			if err := b.ProcessBatch(ctx, b.config.Provider); err != nil {
-				logger.Error(ctx, "event-batcher", "Failed to process batch", err)
+			logger.Info(ctx, "event-batcher", "Batch worker tick", map[string]interface{}{
+				"timestamp": time.Now().Format(time.RFC3339),
+			})
+
+			// Get all provider/user combinations from Redis
+			keys, err := b.redisClient.Keys(ctx, "provider:*:user:*:events").Result()
+			if err != nil {
+				logger.Error(ctx, "event-batcher", "Failed to get provider/user keys", err)
+				continue
+			}
+
+			logger.Info(ctx, "event-batcher", "Found provider/user combinations", map[string]interface{}{
+				"count": len(keys),
+				"keys":  keys,
+			})
+
+			// Process each provider/user combination
+			for _, key := range keys {
+				// Extract provider and userID from key
+				// Key format: provider:sendgrid:user:2:events
+				parts := strings.Split(key, ":")
+				if len(parts) != 5 {
+					logger.Error(ctx, "event-batcher", "Invalid key format", nil, map[string]interface{}{
+						"key":   key,
+						"parts": parts,
+					})
+					continue
+				}
+				provider := parts[1]
+				userID, err := strconv.ParseInt(parts[3], 10, 64)
+				if err != nil {
+					logger.Error(ctx, "event-batcher", "Failed to parse userID", err, map[string]interface{}{
+						"key":         key,
+						"user_id_str": parts[3],
+					})
+					continue
+				}
+
+				logger.Info(ctx, "event-batcher", "Processing batch", map[string]interface{}{
+					"provider": provider,
+					"user_id":  userID,
+					"key":      key,
+				})
+
+				// Process batch for this provider/user combination
+				if err := b.ProcessBatch(ctx, provider, userID); err != nil {
+					logger.Error(ctx, "event-batcher", "Failed to process batch", err, map[string]interface{}{
+						"provider": provider,
+						"user_id":  userID,
+					})
+				}
 			}
 		}
 	}
@@ -412,161 +599,20 @@ func NewEventBatcherProcessor() *EventBatcherProcessor {
 	}
 }
 
+// Process all SparkPost events and use the provider name from the Event object
+func processSparkPostEvent(ctx context.Context, event json.RawMessage, userID int64, email string, batcher *EventBatcher) error {
+	// Add the raw event directly to the batch
+	return GetEventBatcherForProvider("sparkpost").AddEvent(ctx, event, "sparkpost", userID, email)
+}
+
 // ProcessEvent implements the webhook.EventProcessor interface
 func (p *EventBatcherProcessor) ProcessEvent(ctx context.Context, event json.RawMessage, userID int64, email string) error {
-	// Try to parse as SendGrid event first
-	var sgEvent struct {
-		Event       string   `json:"event"`
-		Email       string   `json:"email"`
-		Timestamp   int64    `json:"timestamp"`
-		SGMessageID string   `json:"sg_message_id"`
-		Category    []string `json:"category"`
-		SGEventID   string   `json:"sg_event_id"`
-		SMTPID      string   `json:"smtp-id"`
-		BounceType  string   `json:"bounce_type,omitempty"`
-		Reason      string   `json:"reason,omitempty"`
-		IP          string   `json:"ip,omitempty"`
-		UserAgent   string   `json:"useragent,omitempty"`
+	// Try to get the provider from the context
+	provider, ok := ctx.Value("provider").(string)
+	if !ok {
+		provider = "unknown"
 	}
 
-	if err := json.Unmarshal(event, &sgEvent); err == nil && sgEvent.Event != "" {
-		// It's a SendGrid event
-		webhookEvent := WebhookEvent{
-			EventID:    fmt.Sprintf("sg_%s", sgEvent.SGEventID),
-			EventType:  sgEvent.Event,
-			Timestamp:  time.Unix(sgEvent.Timestamp, 0),
-			Provider:   "sendgrid",
-			UserID:     userID,
-			Email:      sgEvent.Email,
-			Username:   email,
-			MessageID:  sgEvent.SGMessageID,
-			SMTPID:     sgEvent.SMTPID,
-			Categories: sgEvent.Category,
-			Reason:     sgEvent.Reason,
-			IPAddress:  sgEvent.IP,
-			UserAgent:  sgEvent.UserAgent,
-		}
-		return GetEventBatcherForProvider("sendgrid").AddEvent(ctx, webhookEvent)
-	}
-
-	// Try to parse as SparkPost event
-	var spEvent struct {
-		Msys struct {
-			MessageEvent *struct {
-				Type        string `json:"type"`
-				Timestamp   string `json:"timestamp"`
-				MessageID   string `json:"message_id"`
-				RcptTo      string `json:"rcpt_to"`
-				BounceClass string `json:"bounce_class,omitempty"`
-				ErrorCode   string `json:"error_code,omitempty"`
-				Reason      string `json:"reason,omitempty"`
-				IPAddress   string `json:"ip_address,omitempty"`
-				UserAgent   string `json:"user_agent,omitempty"`
-				GeoIP       *GeoIP `json:"geo_ip,omitempty"`
-			} `json:"message_event,omitempty"`
-			TrackEvent *struct {
-				Type      string `json:"type"`
-				Timestamp string `json:"timestamp"`
-				MessageID string `json:"message_id"`
-				RcptTo    string `json:"rcpt_to"`
-				IPAddress string `json:"ip_address,omitempty"`
-				UserAgent string `json:"user_agent,omitempty"`
-				GeoIP     *GeoIP `json:"geo_ip,omitempty"`
-			} `json:"track_event,omitempty"`
-		} `json:"msys"`
-	}
-
-	if err := json.Unmarshal(event, &spEvent); err == nil {
-		var eventType string
-		var timestamp time.Time
-		var messageID string
-		var recipientEmail string
-		var errorCode string
-		var reason string
-		var ipAddress string
-		var userAgent string
-		var geoIP *GeoIP
-
-		if spEvent.Msys.MessageEvent != nil {
-			eventType = spEvent.Msys.MessageEvent.Type
-			timestamp, _ = time.Parse(time.RFC3339, spEvent.Msys.MessageEvent.Timestamp)
-			messageID = spEvent.Msys.MessageEvent.MessageID
-			recipientEmail = spEvent.Msys.MessageEvent.RcptTo
-			errorCode = spEvent.Msys.MessageEvent.ErrorCode
-			reason = spEvent.Msys.MessageEvent.Reason
-			ipAddress = spEvent.Msys.MessageEvent.IPAddress
-			userAgent = spEvent.Msys.MessageEvent.UserAgent
-			geoIP = spEvent.Msys.MessageEvent.GeoIP
-		} else if spEvent.Msys.TrackEvent != nil {
-			eventType = spEvent.Msys.TrackEvent.Type
-			timestamp, _ = time.Parse(time.RFC3339, spEvent.Msys.TrackEvent.Timestamp)
-			messageID = spEvent.Msys.TrackEvent.MessageID
-			recipientEmail = spEvent.Msys.TrackEvent.RcptTo
-			ipAddress = spEvent.Msys.TrackEvent.IPAddress
-			userAgent = spEvent.Msys.TrackEvent.UserAgent
-			geoIP = spEvent.Msys.TrackEvent.GeoIP
-		}
-
-		if eventType != "" {
-			webhookEvent := WebhookEvent{
-				EventID:   fmt.Sprintf("sp_%s", messageID),
-				EventType: eventType,
-				Timestamp: timestamp,
-				Provider:  "sparkpost",
-				UserID:    userID,
-				Email:     recipientEmail,
-				Username:  email,
-				MessageID: messageID,
-				Reason:    reason,
-				ErrorCode: errorCode,
-				IPAddress: ipAddress,
-				UserAgent: userAgent,
-				GeoIP:     geoIP,
-			}
-			return GetEventBatcherForProvider("sparkpost").AddEvent(ctx, webhookEvent)
-		}
-	}
-
-	// Try to parse as Postmark event
-	var pmEvent struct {
-		MessageID string `json:"MessageID"`
-		Type      string `json:"Type"`
-		Timestamp string `json:"DeliveredAt"`
-		Recipient string `json:"Recipient"`
-		Details   string `json:"Details,omitempty"`
-		ErrorCode string `json:"ErrorCode,omitempty"`
-		IPAddress string `json:"ServerIP,omitempty"`
-		UserAgent string `json:"UserAgent,omitempty"`
-	}
-
-	if err := json.Unmarshal(event, &pmEvent); err == nil && pmEvent.MessageID != "" {
-		timestamp, _ := time.Parse(time.RFC3339, pmEvent.Timestamp)
-		webhookEvent := WebhookEvent{
-			EventID:   fmt.Sprintf("pm_%s", pmEvent.MessageID),
-			EventType: pmEvent.Type,
-			Timestamp: timestamp,
-			Provider:  "postmark",
-			UserID:    userID,
-			Email:     pmEvent.Recipient,
-			Username:  email,
-			MessageID: pmEvent.MessageID,
-			Reason:    pmEvent.Details,
-			ErrorCode: pmEvent.ErrorCode,
-			IPAddress: pmEvent.IPAddress,
-			UserAgent: pmEvent.UserAgent,
-		}
-		return GetEventBatcherForProvider("postmark").AddEvent(ctx, webhookEvent)
-	}
-
-	// If we can't determine the event type, create a generic event
-	webhookEvent := WebhookEvent{
-		EventID:   fmt.Sprintf("gen_%s", uuid.New().String()),
-		EventType: "unknown",
-		Timestamp: time.Now(),
-		Provider:  "unknown",
-		UserID:    userID,
-		Email:     email,
-		Username:  email,
-	}
-	return GetEventBatcherForProvider("unknown").AddEvent(ctx, webhookEvent)
+	// Add the raw event directly to the batch
+	return GetEventBatcherForProvider(provider).AddEvent(ctx, event, provider, userID, email)
 }

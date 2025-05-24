@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"relay-go/m/database"
@@ -177,27 +176,30 @@ func main() {
 		// Create request context with ID
 		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
 
+		// Add provider to context
+		providerCtx := context.WithValue(ctx, "provider", "sendgrid")
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			logger.Error(ctx, "sendgrid-webhook", "Failed to read request body", err)
+			logger.Error(providerCtx, "sendgrid-webhook", "Failed to read request body", err)
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
 
-		userID, email, err := webhookHandler.ProcessWebhook(ctx, "sendgrid", body, r.Header)
+		userID, email, err := webhookHandler.ProcessWebhook(providerCtx, "sendgrid", body, r.Header)
 		if err != nil {
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
 
 		// Add user ID to context
-		ctx = logger.WithUserID(ctx, fmt.Sprintf("%d", userID))
+		providerCtx = logger.WithUserID(providerCtx, fmt.Sprintf("%d", userID))
 
 		// Unmarshal the events
 		var events []json.RawMessage
 		if err := json.Unmarshal(body, &events); err != nil {
-			logger.Error(ctx, "sendgrid-webhook", "Failed to unmarshal message body", err)
+			logger.Error(providerCtx, "sendgrid-webhook", "Failed to unmarshal message body", err)
 			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
 			return
 		}
@@ -210,14 +212,14 @@ func main() {
 		} else {
 			// Light mode: Send to both Splunk and S3
 			processor = webhook.NewCompositeProcessor(
-				webhook.NewSplunkEventProcessor(splunkClient),
+				webhook.NewSplunkEventProcessor(splunkClient, "sendgrid"),
 				database.NewEventBatcherProcessor(),
 			)
 		}
 
 		// Process all events
-		if err := webhook.ProcessWebhookEvents(ctx, events, int64(userID), email, processor); err != nil {
-			logger.Error(ctx, "sendgrid-webhook", "Failed to process events", err)
+		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
+			logger.Error(providerCtx, "sendgrid-webhook", "Failed to process events", err)
 			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
 			return
 		}
@@ -226,51 +228,68 @@ func main() {
 	})
 
 	http.HandleFunc("/webhook-events/sparkpost", func(w http.ResponseWriter, r *http.Request) {
+		// Create request context with ID
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+
+		// Add provider to context
+		providerCtx := context.WithValue(ctx, "provider", "sparkpost")
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			logger.Error(providerCtx, "sparkpost-webhook", "Failed to read request body", err)
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
 
-		// Verify the webhook and find the associated user
-
-		userID, espID, err := verifySparkPostWebhookAndFindUser(database.GetDB(), r.Header)
+		userID, email, err := webhookHandler.ProcessWebhook(providerCtx, "sparkpost", body, r.Header)
 		if err != nil {
-			log.Printf("Sparkpost - Failed to verify webhook: %v", err)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
 
-		log.Printf("UserID: %v, ESPID: %v", userID, espID)
+		// Add user ID to context
+		providerCtx = logger.WithUserID(providerCtx, fmt.Sprintf("%d", userID))
 
-		var sparkPostPayload SparkPostPayload
-		err = json.Unmarshal(body, &sparkPostPayload)
+		// Extract events from SparkPost payload
+		extractor := webhook.NewSparkPostEventExtractor()
+		events, err := extractor.ExtractEvents(providerCtx, body)
 		if err != nil {
-			log.Printf("Failed to unmarshal SparkPost events: %v", err)
+			logger.Error(providerCtx, "sparkpost-webhook", "Failed to extract events", err)
 			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
 			return
 		}
 
-		for _, event := range sparkPostPayload {
-			err = associateSparkPostEventWithUser(database.GetDB(), event.Msys.MessageEvent.MessageID, userID, espID)
-			if err != nil {
-				log.Printf("Failed to associate event with user: %v", err)
-				// Decide whether to continue or return based on your error handling strategy
-			}
+		// Create appropriate processor based on mode
+		var processor webhook.EventProcessor
+		if database.IsMySQLKafkaMode() {
+			// Full mode: Process with MySQL and Kafka
+			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["sparkpost"])
+		} else {
+			// Light mode: Send to both Splunk and S3
+			processor = webhook.NewCompositeProcessor(
+				webhook.NewSplunkEventProcessor(splunkClient, "sparkpost"),
+				database.NewEventBatcherProcessor(),
+			)
 		}
 
-		message := Message{
-			Headers: r.Header,
-			Body:    body,
+		// Process all events using the consistent pattern
+		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
+			logger.Error(providerCtx, "sparkpost-webhook", "Failed to process events", err)
+			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
+			return
 		}
 
-		handleRequest(w, producer, config.WebhookTopics["sparkpost"], message)
+		w.WriteHeader(http.StatusOK)
 	})
 
 	http.HandleFunc("/webhook-events/postmark", func(w http.ResponseWriter, r *http.Request) {
+		// Create request context with ID
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			logger.Error(ctx, "postmark-webhook", "Failed to read request body", err)
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
@@ -278,50 +297,88 @@ func main() {
 
 		userID, espID, err := verifyPostmarkWebhookAndFindUser(database.GetDB(), r.Header)
 		if err != nil {
-			log.Printf("Postmark - Failed to verify webhook: %v", err)
+			logger.Error(ctx, "postmark-webhook", "Failed to verify webhook", err)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
 
+		// Add user ID to context
+		ctx = logger.WithUserID(ctx, fmt.Sprintf("%d", userID))
+
 		var postmarkEvent struct {
 			MessageID string `json:"MessageID"`
 		}
-		err = json.Unmarshal(body, &postmarkEvent)
-		if err != nil {
-			log.Printf("Failed to unmarshal Postmark event: %v", err)
+		if err := json.Unmarshal(body, &postmarkEvent); err != nil {
+			logger.Error(ctx, "postmark-webhook", "Failed to unmarshal event", err)
 			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
 			return
 		}
 
-		err = associatePostmarkEventWithUser(database.GetDB(), postmarkEvent.MessageID, userID, espID)
-		if err != nil {
-			log.Printf("Failed to associate event with user: %v", err)
-			http.Error(w, "Failed to process event", http.StatusInternalServerError)
+		// Create appropriate processor based on mode
+		var processor webhook.EventProcessor
+		if database.IsMySQLKafkaMode() {
+			// Full mode: Process with MySQL and Kafka
+			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["postmark"])
+
+			// Associate event with user in database
+			if err := associatePostmarkEventWithUser(database.GetDB(), postmarkEvent.MessageID, userID, espID); err != nil {
+				logger.Error(ctx, "postmark-webhook", "Failed to associate event with user", err)
+				// Continue processing even if association fails
+			}
+		} else {
+			// Light mode: Send to both Splunk and S3
+			processor = webhook.NewCompositeProcessor(
+				webhook.NewSplunkEventProcessor(splunkClient, "postmark"),
+				database.NewEventBatcherProcessor(),
+			)
+		}
+
+		// Process the event
+		if err := processor.ProcessEvent(ctx, body, int64(userID), ""); err != nil {
+			logger.Error(ctx, "postmark-webhook", "Failed to process event", err)
+			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
 			return
 		}
 
-		message := Message{
-			Headers: r.Header,
-			Body:    body,
-		}
-
-		handleRequest(w, producer, config.WebhookTopics["postmark"], message)
+		w.WriteHeader(http.StatusOK)
 	})
 
 	http.HandleFunc("/webhook-events/socketlabs", func(w http.ResponseWriter, r *http.Request) {
+		// Create request context with ID
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			logger.Error(ctx, "socketlabs-webhook", "Failed to read request body", err)
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
 
-		message := Message{
-			Headers: r.Header,
-			Body:    body,
+		// Note: SocketLabs doesn't have verification implemented yet
+		// In the future, we could add this similar to other providers
+
+		// Create appropriate processor based on mode
+		var processor webhook.EventProcessor
+		if database.IsMySQLKafkaMode() {
+			// Full mode: Process with MySQL and Kafka
+			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["socketlabs"])
+		} else {
+			// Light mode: Send to both Splunk and S3
+			processor = webhook.NewCompositeProcessor(
+				webhook.NewSplunkEventProcessor(splunkClient, "socketlabs"),
+				database.NewEventBatcherProcessor(),
+			)
 		}
 
-		handleRequest(w, producer, config.WebhookTopics["socketlabs"], message)
+		// Process the event - using 0 for userID since we don't verify
+		if err := processor.ProcessEvent(ctx, body, 0, ""); err != nil {
+			logger.Error(ctx, "socketlabs-webhook", "Failed to process event", err)
+			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
 	})
 
 	http.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {

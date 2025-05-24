@@ -35,26 +35,33 @@ func NewSplunkClient(host, token string) *SplunkClient {
 }
 
 // SendEvent sends an event to Splunk
-func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int, email string) error {
+func (c *SplunkClient) SendEvent(ctx context.Context, data []byte, userID int, email string, provider string) error {
 	// Try to unmarshal as a single event first
 	var singleEvent map[string]interface{}
 	if err := json.Unmarshal(data, &singleEvent); err == nil {
 		// It's a single event, wrap it in a slice
-		return c.sendEventsToSplunk(ctx, []map[string]interface{}{singleEvent}, userID, email)
+		return c.sendEventsToSplunk(ctx, []map[string]interface{}{singleEvent}, userID, email, provider)
 	}
 
 	// Try to unmarshal as an array of events
 	var events []map[string]interface{}
 	if err := json.Unmarshal(data, &events); err != nil {
 		logger.Error(ctx, "splunk", "Failed to unmarshal data", err)
+
+		// Try a more lenient approach - if it's empty, just return success
+		if len(data) == 0 || string(data) == "null" || string(data) == "{}" || string(data) == "[]" {
+			logger.Info(ctx, "splunk", "Skipping empty event", nil)
+			return nil
+		}
+
 		return fmt.Errorf("failed to unmarshal data: %v", err)
 	}
 
-	return c.sendEventsToSplunk(ctx, events, userID, email)
+	return c.sendEventsToSplunk(ctx, events, userID, email, provider)
 }
 
 // sendEventsToSplunk sends a slice of events to Splunk
-func (c *SplunkClient) sendEventsToSplunk(ctx context.Context, events []map[string]interface{}, userID int, email string) error {
+func (c *SplunkClient) sendEventsToSplunk(ctx context.Context, events []map[string]interface{}, userID int, email string, provider string) error {
 	// Construct the Splunk URL
 	splunkURL := fmt.Sprintf("https://%s.splunkcloud.com:8088/services/collector/event", c.host)
 
@@ -63,6 +70,7 @@ func (c *SplunkClient) sendEventsToSplunk(ctx context.Context, events []map[stri
 		// Add userID to the event
 		event["user_id"] = userID
 		event["sh_username"] = email
+		event["provider"] = provider
 
 		// Create the request body
 		requestBody := map[string]interface{}{
