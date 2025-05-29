@@ -51,7 +51,7 @@ resource "aws_security_group" "efs" {
   }
 }
 
-# EFS Access Point
+# EFS Access Point for Redis
 resource "aws_efs_access_point" "redis" {
   file_system_id = aws_efs_file_system.redis.id
 
@@ -69,8 +69,9 @@ resource "aws_efs_access_point" "redis" {
     uid = 999
   }
 
-  tags = {
+    tags = {
     Name        = "${var.environment}-relay-go-redis-ap"
     Environment = var.environment
   }
-} 
+}
+

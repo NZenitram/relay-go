@@ -46,6 +46,22 @@ func (h *WebhookHandler) ProcessWebhook(ctx context.Context, provider string, bo
 		} else {
 			userID, email, verifyErr = verifySparkPostWebhookAndFindUserDynamoDB(h.dynamoDB, headers)
 		}
+	case "socketlabs":
+		if database.IsMySQLKafkaMode() {
+			userID, _, verifyErr = verifySocketLabsWebhookAndFindUser(h.db, headers)
+		} else {
+			userID, email, verifyErr = verifySocketLabsWebhookAndFindUserDynamoDB(h.dynamoDB, headers)
+		}
+	case "postmark":
+		if database.IsMySQLKafkaMode() {
+			userID, _, verifyErr = verifyPostmarkWebhookAndFindUser(h.db, headers)
+		} else {
+			userID, email, verifyErr = verifyPostmarkWebhookAndFindUserDynamoDB(h.dynamoDB, headers)
+		}
+	case "mandrill":
+		// Mandrill verification needs special handling since it requires form params
+		// This will be called from the main handler with proper params
+		verifyErr = fmt.Errorf("mandrill verification should be called directly from handler")
 	default:
 		return 0, "", fmt.Errorf("unsupported provider: %s", provider)
 	}

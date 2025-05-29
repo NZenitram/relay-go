@@ -61,4 +61,6 @@ resource "aws_security_group" "ecs_tasks" {
     Name        = "${var.environment}-relay-go-ecs-sg"
     Environment = var.environment
   }
-} 
+}
+
+

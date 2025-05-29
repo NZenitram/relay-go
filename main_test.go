@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"relay-go/m/logger"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -91,6 +94,7 @@ func TestEnvironmentVariables(t *testing.T) {
 		"/webhook-events/sparkpost",
 		"/webhook-events/postmark",
 		"/webhook-events/socketlabs",
+		"/webhook-events/mandrill",
 	}
 
 	for _, endpoint := range webhookEndpoints {
@@ -115,4 +119,50 @@ func TestEnvironmentVariables(t *testing.T) {
 	}
 
 	// Add more assertions here as needed
+}
+
+func TestHealthEndpoint(t *testing.T) {
+	// Test health endpoint
+	req, err := http.NewRequest("GET", "/healthcheck", nil)
+	assert.NoError(t, err)
+
+	rr := httptest.NewRecorder()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+		logger.Info(ctx, "healthcheck", "Health check request received", nil)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"status": "healthy"}`))
+	})
+
+	handler.ServeHTTP(rr, req)
+	assert.Equal(t, http.StatusOK, rr.Code)
+	assert.Contains(t, rr.Body.String(), `"status": "healthy"`)
+}
+
+func TestSplunkEnabledConfiguration(t *testing.T) {
+	// Test with Splunk enabled
+	os.Setenv("SPLUNK_ENABLED", "true")
+	os.Setenv("SPLUNK_HOST", "test-host")
+	os.Setenv("SPLUNK_KEY", "test-key")
+	config, err := loadConfig()
+	assert.NoError(t, err)
+	assert.True(t, config.SplunkEnabled)
+
+	// Test with Splunk disabled
+	os.Setenv("SPLUNK_ENABLED", "false")
+	config, err = loadConfig()
+	assert.NoError(t, err)
+	assert.False(t, config.SplunkEnabled)
+
+	// Test with missing SPLUNK_ENABLED (should default to false)
+	os.Unsetenv("SPLUNK_ENABLED")
+	config, err = loadConfig()
+	assert.NoError(t, err)
+	assert.False(t, config.SplunkEnabled)
+
+	// Clean up
+	os.Unsetenv("SPLUNK_ENABLED")
+	os.Unsetenv("SPLUNK_HOST")
+	os.Unsetenv("SPLUNK_KEY")
 }

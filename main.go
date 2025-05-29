@@ -27,6 +27,7 @@ type Config struct {
 	WebhookTopics map[string]string
 	SplunkHost    string
 	SplunkToken   string
+	SplunkEnabled bool
 	RedisHost     string
 	LogLevel      string
 }
@@ -47,11 +48,13 @@ func loadConfig() (*Config, error) {
 			"sparkpost":  os.Getenv("WEBHOOK_TOPIC_SPARKPOST"),
 			"postmark":   os.Getenv("WEBHOOK_TOPIC_POSTMARK"),
 			"socketlabs": os.Getenv("WEBHOOK_TOPIC_SOCKETLABS"),
+			"mandrill":   os.Getenv("WEBHOOK_TOPIC_MANDRILL"),
 		},
-		SplunkHost:  os.Getenv("SPLUNK_HOST"),
-		SplunkToken: os.Getenv("SPLUNK_KEY"),
-		RedisHost:   os.Getenv("REDIS_HOST"),
-		LogLevel:    os.Getenv("LOG_LEVEL"),
+		SplunkHost:    os.Getenv("SPLUNK_HOST"),
+		SplunkToken:   os.Getenv("SPLUNK_KEY"),
+		SplunkEnabled: os.Getenv("SPLUNK_ENABLED") == "true",
+		RedisHost:     os.Getenv("REDIS_HOST"),
+		LogLevel:      os.Getenv("LOG_LEVEL"),
 	}
 
 	// Validate required configuration
@@ -64,11 +67,11 @@ func loadConfig() (*Config, error) {
 	if config.EmailTopic == "" {
 		return nil, fmt.Errorf("EMAIL_TOPIC environment variable is not set")
 	}
-	if config.SplunkHost == "" {
-		return nil, fmt.Errorf("SPLUNK_HOST environment variable is not set")
+	if config.SplunkEnabled && config.SplunkHost == "" {
+		return nil, fmt.Errorf("SPLUNK_HOST environment variable is not set when SPLUNK_ENABLED=true")
 	}
-	if config.SplunkToken == "" {
-		return nil, fmt.Errorf("SPLUNK_KEY environment variable is not set")
+	if config.SplunkEnabled && config.SplunkToken == "" {
+		return nil, fmt.Errorf("SPLUNK_KEY environment variable is not set when SPLUNK_ENABLED=true")
 	}
 	if config.RedisHost == "" {
 		return nil, fmt.Errorf("REDIS_HOST environment variable is not set")
@@ -111,10 +114,34 @@ func init() {
 		logger.Fatal(nil, "init", "Failed to initialize data stores", err)
 	}
 
-	splunkClient = webhook.NewSplunkClient(config.SplunkHost, config.SplunkToken)
+	// Only initialize Splunk client if enabled
+	if config.SplunkEnabled {
+		splunkClient = webhook.NewSplunkClient(config.SplunkHost, config.SplunkToken)
+	}
 
 	// Initialize webhook handler
 	webhookHandler = NewWebhookHandler(database.GetDB(), database.GetDynamoClient())
+}
+
+// createEventProcessor creates the appropriate event processor based on mode and configuration
+func createEventProcessor(producer sarama.SyncProducer, provider string) webhook.EventProcessor {
+	if database.IsMySQLKafkaMode() {
+		// Full mode: Process with MySQL and Kafka
+		return webhook.NewKafkaEventProcessor(producer, config.WebhookTopics[provider])
+	} else {
+		// Light mode: Choose processors based on configuration
+		var processors []webhook.EventProcessor
+
+		// Always add S3 processor
+		processors = append(processors, database.NewEventBatcherProcessor())
+
+		// Only add Splunk processor if enabled
+		if config.SplunkEnabled && splunkClient != nil {
+			processors = append(processors, webhook.NewSplunkEventProcessor(splunkClient, provider))
+		}
+
+		return webhook.NewCompositeProcessor(processors...)
+	}
 }
 
 func main() {
@@ -205,17 +232,7 @@ func main() {
 		}
 
 		// Create appropriate processor based on mode
-		var processor webhook.EventProcessor
-		if database.IsMySQLKafkaMode() {
-			// Full mode: Process with MySQL and Kafka
-			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["sendgrid"])
-		} else {
-			// Light mode: Send to both Splunk and S3
-			processor = webhook.NewCompositeProcessor(
-				webhook.NewSplunkEventProcessor(splunkClient, "sendgrid"),
-				database.NewEventBatcherProcessor(),
-			)
-		}
+		processor := createEventProcessor(producer, "sendgrid")
 
 		// Process all events
 		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
@@ -261,17 +278,7 @@ func main() {
 		}
 
 		// Create appropriate processor based on mode
-		var processor webhook.EventProcessor
-		if database.IsMySQLKafkaMode() {
-			// Full mode: Process with MySQL and Kafka
-			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["sparkpost"])
-		} else {
-			// Light mode: Send to both Splunk and S3
-			processor = webhook.NewCompositeProcessor(
-				webhook.NewSplunkEventProcessor(splunkClient, "sparkpost"),
-				database.NewEventBatcherProcessor(),
-			)
-		}
+		processor := createEventProcessor(producer, "sparkpost")
 
 		// Process all events using the consistent pattern
 		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
@@ -287,55 +294,57 @@ func main() {
 		// Create request context with ID
 		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
 
+		// Add provider to context
+		providerCtx := context.WithValue(ctx, "provider", "postmark")
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			logger.Error(ctx, "postmark-webhook", "Failed to read request body", err)
+			logger.Error(providerCtx, "postmark-webhook", "Failed to read request body", err)
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
 
-		userID, espID, err := verifyPostmarkWebhookAndFindUser(database.GetDB(), r.Header)
+		userID, email, err := webhookHandler.ProcessWebhook(providerCtx, "postmark", body, r.Header)
 		if err != nil {
-			logger.Error(ctx, "postmark-webhook", "Failed to verify webhook", err)
 			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
 			return
 		}
 
 		// Add user ID to context
-		ctx = logger.WithUserID(ctx, fmt.Sprintf("%d", userID))
+		providerCtx = logger.WithUserID(providerCtx, fmt.Sprintf("%d", userID))
 
-		var postmarkEvent struct {
-			MessageID string `json:"MessageID"`
-		}
-		if err := json.Unmarshal(body, &postmarkEvent); err != nil {
-			logger.Error(ctx, "postmark-webhook", "Failed to unmarshal event", err)
-			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
-			return
+		// Unmarshal the events (Postmark typically sends single events, but wrap in array for consistency)
+		var events []json.RawMessage
+
+		// Try to unmarshal as array first (in case Postmark sends multiple events)
+		if err := json.Unmarshal(body, &events); err != nil {
+			// If that fails, treat as single event and wrap in array
+			events = []json.RawMessage{body}
 		}
 
 		// Create appropriate processor based on mode
-		var processor webhook.EventProcessor
-		if database.IsMySQLKafkaMode() {
-			// Full mode: Process with MySQL and Kafka
-			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["postmark"])
+		processor := createEventProcessor(producer, "postmark")
 
-			// Associate event with user in database
-			if err := associatePostmarkEventWithUser(database.GetDB(), postmarkEvent.MessageID, userID, espID); err != nil {
-				logger.Error(ctx, "postmark-webhook", "Failed to associate event with user", err)
-				// Continue processing even if association fails
+		// For MySQL mode, also try to extract MessageID for association
+		if database.IsMySQLKafkaMode() && len(events) > 0 {
+			var postmarkEvent struct {
+				MessageID string `json:"MessageID"`
 			}
-		} else {
-			// Light mode: Send to both Splunk and S3
-			processor = webhook.NewCompositeProcessor(
-				webhook.NewSplunkEventProcessor(splunkClient, "postmark"),
-				database.NewEventBatcherProcessor(),
-			)
+			if err := json.Unmarshal(events[0], &postmarkEvent); err == nil && postmarkEvent.MessageID != "" {
+				// Get espID from the original verification (we need to call it again for MySQL mode)
+				if _, espID, err := verifyPostmarkWebhookAndFindUser(database.GetDB(), r.Header); err == nil {
+					if err := associatePostmarkEventWithUser(database.GetDB(), postmarkEvent.MessageID, userID, espID); err != nil {
+						logger.Error(providerCtx, "postmark-webhook", "Failed to associate event with user", err)
+						// Continue processing even if association fails
+					}
+				}
+			}
 		}
 
-		// Process the event
-		if err := processor.ProcessEvent(ctx, body, int64(userID), ""); err != nil {
-			logger.Error(ctx, "postmark-webhook", "Failed to process event", err)
+		// Process all events using the consistent pattern
+		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
+			logger.Error(providerCtx, "postmark-webhook", "Failed to process events", err)
 			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
 			return
 		}
@@ -347,33 +356,108 @@ func main() {
 		// Create request context with ID
 		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
 
+		// Add provider to context
+		providerCtx := context.WithValue(ctx, "provider", "socketlabs")
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			logger.Error(ctx, "socketlabs-webhook", "Failed to read request body", err)
+			logger.Error(providerCtx, "socketlabs-webhook", "Failed to read request body", err)
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		defer r.Body.Close()
 
-		// Note: SocketLabs doesn't have verification implemented yet
-		// In the future, we could add this similar to other providers
-
-		// Create appropriate processor based on mode
-		var processor webhook.EventProcessor
-		if database.IsMySQLKafkaMode() {
-			// Full mode: Process with MySQL and Kafka
-			processor = webhook.NewKafkaEventProcessor(producer, config.WebhookTopics["socketlabs"])
-		} else {
-			// Light mode: Send to both Splunk and S3
-			processor = webhook.NewCompositeProcessor(
-				webhook.NewSplunkEventProcessor(splunkClient, "socketlabs"),
-				database.NewEventBatcherProcessor(),
-			)
+		userID, email, err := webhookHandler.ProcessWebhook(providerCtx, "socketlabs", body, r.Header)
+		if err != nil {
+			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+			return
 		}
 
-		// Process the event - using 0 for userID since we don't verify
-		if err := processor.ProcessEvent(ctx, body, 0, ""); err != nil {
-			logger.Error(ctx, "socketlabs-webhook", "Failed to process event", err)
+		// Add user ID to context
+		providerCtx = logger.WithUserID(providerCtx, fmt.Sprintf("%d", userID))
+
+		// Unmarshal the events (SocketLabs typically sends an array like SendGrid)
+		var events []json.RawMessage
+		if err := json.Unmarshal(body, &events); err != nil {
+			logger.Error(providerCtx, "socketlabs-webhook", "Failed to unmarshal message body", err)
+			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
+			return
+		}
+
+		// Create appropriate processor based on mode
+		processor := createEventProcessor(producer, "socketlabs")
+
+		// Process all events using the consistent pattern
+		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
+			logger.Error(providerCtx, "socketlabs-webhook", "Failed to process events", err)
+			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	})
+
+	http.HandleFunc("/webhook-events/mandrill", func(w http.ResponseWriter, r *http.Request) {
+		// Create request context with ID
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+
+		// Add provider to context
+		providerCtx := context.WithValue(ctx, "provider", "mandrill")
+
+		// Parse form data (Mandrill sends application/x-www-form-urlencoded)
+		if err := r.ParseForm(); err != nil {
+			logger.Error(providerCtx, "mandrill-webhook", "Failed to parse form data", err)
+			http.Error(w, "Failed to parse form data", http.StatusBadRequest)
+			return
+		}
+
+		// Verify webhook signature FIRST (same pattern as SendGrid)
+		webhookURL := fmt.Sprintf("%s://%s%s", "https", r.Host, r.URL.Path)
+
+		var userID int
+		var email string
+		var verifyErr error
+
+		// Verify webhook signature and find user
+		if database.IsMySQLKafkaMode() {
+			userID, _, email, verifyErr = verifyMandrillWebhookAndFindUser(database.GetDB(), webhookURL, r.Form, r.Header)
+		} else {
+			userID, email, verifyErr = verifyMandrillWebhookAndFindUserDynamoDB(database.GetDynamoClient(), webhookURL, r.Form, r.Header)
+		}
+
+		if verifyErr != nil {
+			logger.Error(providerCtx, "mandrill-webhook", "Failed to verify webhook", verifyErr)
+			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+			return
+		}
+
+		// Add user ID to context
+		providerCtx = logger.WithUserID(providerCtx, fmt.Sprintf("%d", userID))
+
+		// Now get mandrill_events parameter (after verification)
+		mandrillEventsParam := r.FormValue("mandrill_events")
+		if mandrillEventsParam == "" {
+			logger.Error(providerCtx, "mandrill-webhook", "Missing mandrill_events parameter", nil)
+			http.Error(w, "Missing mandrill_events parameter", http.StatusBadRequest)
+			return
+		}
+
+		// Parse the mandrill_events JSON array
+		var events []json.RawMessage
+		if err := json.Unmarshal([]byte(mandrillEventsParam), &events); err != nil {
+			logger.Error(providerCtx, "mandrill-webhook", "Failed to parse mandrill_events JSON", err, map[string]interface{}{
+				"mandrill_events": mandrillEventsParam,
+			})
+			http.Error(w, "Failed to process event payload", http.StatusBadRequest)
+			return
+		}
+
+		// Create appropriate processor based on mode
+		processor := createEventProcessor(producer, "mandrill")
+
+		// Process all events using the consistent pattern
+		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
+			logger.Error(providerCtx, "mandrill-webhook", "Failed to process events", err)
 			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
 			return
 		}

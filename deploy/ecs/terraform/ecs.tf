@@ -32,6 +32,8 @@ resource "aws_cloudwatch_log_group" "redis" {
   }
 }
 
+
+
 # ECS Task Execution Role
 resource "aws_iam_role" "ecs_execution_role" {
   name = "${var.environment}-relay-go-execution-role"
@@ -152,24 +154,25 @@ resource "aws_ecs_task_definition" "main" {
   family                   = "${var.environment}-relay-go"
   network_mode            = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                     = 512  # Increased for Redis
-  memory                  = 1024 # Increased for Redis
+  cpu                     = 512   # Original value before Kafka
+  memory                  = 1024  # Original value before Kafka
   execution_role_arn      = aws_iam_role.ecs_execution_role.arn
   task_role_arn           = aws_iam_role.ecs_task_role.arn
 
   volume {
     name = "redis-data"
     efs_volume_configuration {
-      file_system_id          = aws_efs_file_system.redis.id
-      root_directory          = "/"
-      transit_encryption      = "ENABLED"
-      transit_encryption_port = 2049
+      file_system_id     = aws_efs_file_system.redis.id
+      root_directory     = "/"
+      transit_encryption = "ENABLED"
       authorization_config {
         access_point_id = aws_efs_access_point.redis.id
         iam             = "ENABLED"
       }
     }
   }
+
+
 
   container_definitions = jsonencode([
     {
@@ -216,7 +219,7 @@ resource "aws_ecs_task_definition" "main" {
         },
         {
           name  = "KAFKA_BROKERS"
-          value = "kafka.sh-internal:9092"
+          value = "localhost:9092"
         },
         {
           name  = "EMAIL_TOPIC"
@@ -237,6 +240,10 @@ resource "aws_ecs_task_definition" "main" {
         {
           name  = "WEBHOOK_TOPIC_SPARKPOST"
           value = "webhook-events-sparkpost"
+        },
+        {
+          name  = "WEBHOOK_TOPIC_MANDRILL"
+          value = "webhook-events-mandrill"
         },
         {
           name  = "MYSQL_HOST"
@@ -261,6 +268,10 @@ resource "aws_ecs_task_definition" "main" {
         {
           name  = "MYSQL_SSL_MODE"
           value = "disable"
+        },
+        {
+          name  = "SPLUNK_ENABLED"
+          value = "false"
         }
       ]
       secrets = [
@@ -358,26 +369,3 @@ resource "aws_ecs_service" "main" {
   }
 }
 
-# # EFS Access Point for Redis
-# resource "aws_efs_access_point" "redis" {
-#   file_system_id = aws_efs_file_system.redis.id
-
-#   root_directory {
-#     path = "/redis"
-#     creation_info {
-#       owner_gid   = 999
-#       owner_uid   = 999
-#       permissions = "755"
-#     }
-#   }
-
-#   posix_user {
-#     gid = 999
-#     uid = 999
-#   }
-
-#   tags = {
-#     Name        = "${var.environment}-relay-go-redis-ap"
-#     Environment = var.environment
-#   }
-# } 
