@@ -465,6 +465,47 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
+	http.HandleFunc("/webhook-events/resend", func(w http.ResponseWriter, r *http.Request) {
+		// Create request context with ID
+		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
+
+		// Add provider to context
+		providerCtx := context.WithValue(ctx, "provider", "resend")
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			logger.Error(providerCtx, "resend-webhook", "Failed to read request body", err)
+			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
+			return
+		}
+		defer r.Body.Close()
+
+		userID, email, err := webhookHandler.ProcessWebhook(providerCtx, "resend", body, r.Header)
+		if err != nil {
+			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+			return
+		}
+
+		// Add user ID to context
+		providerCtx = logger.WithUserID(providerCtx, fmt.Sprintf("%d", userID))
+
+		// For Resend, we store the raw payload as a single event
+		// Wrap the body in an array to match the expected format
+		events := []json.RawMessage{json.RawMessage(body)}
+
+		// Create appropriate processor based on mode
+		processor := createEventProcessor(producer, "resend")
+
+		// Process all events
+		if err := webhook.ProcessWebhookEvents(providerCtx, events, int64(userID), email, processor); err != nil {
+			logger.Error(providerCtx, "resend-webhook", "Failed to process events", err)
+			http.Error(w, "Failed to process webhook", http.StatusInternalServerError)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	})
+
 	http.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
 		ctx := logger.WithRequestID(r.Context(), uuid.New().String())
 		logger.Info(ctx, "healthcheck", "Health check request received", nil)

@@ -37,6 +37,8 @@ WEBHOOK_TOPIC_SENDGRID=your_sendgrid_webhook_topic
 WEBHOOK_TOPIC_SPARKPOST=your_sparkpost_webhook_topic
 WEBHOOK_TOPIC_POSTMARK=your_postmark_webhook_topic
 WEBHOOK_TOPIC_SOCKETLABS=your_socketlabs_webhook_topic
+WEBHOOK_TOPIC_MANDRILL=your_mandrill_webhook_topic
+WEBHOOK_TOPIC_RESEND=your_resend_webhook_topic
 HTTP_SERVER_PORT=your_http_server_port
 ```
 
@@ -83,6 +85,8 @@ The system provides webhook endpoints for various ESPs:
 - SparkPost: `/webhook-events/sparkpost`
 - Postmark: `/webhook-events/postmark`
 - SocketLabs: `/webhook-events/socketlabs`
+- Mandrill: `/webhook-events/mandrill`
+- Resend: `/webhook-events/resend`
 
 Configure your ESP accounts to send webhook events to these endpoints.
 
@@ -267,6 +271,8 @@ The system provides webhook endpoints for various ESPs:
 - SparkPost: `/webhook-events/sparkpost`
 - Postmark: `/webhook-events/postmark`
 - SocketLabs: `/webhook-events/socketlabs`
+- Mandrill: `/webhook-events/mandrill`
+- Resend: `/webhook-events/resend`
 
 Configure your ESP accounts to send webhook events to these endpoints.
 
@@ -358,6 +364,17 @@ aws dynamodb put-item \
     "id": {"N": "8"},
     "email": {"S": "matthew.simpson2@sh-email.com"},
     "sendgrid_verification_key": {"S": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE/uhoEqKTdq2vESSPbe08UuH3RVVUwyJOXckuFxllsK0CoUk4x1XGzSmvBjWDtZZ18bYB+Pud/7DydfS+wc/GSA=="},
+    "created_at": {"N": "1716336000"},
+    "updated_at": {"N": "1716336000"}
+  }'
+
+# Example for Resend webhook secret
+aws dynamodb put-item \
+  --table-name users \
+  --item '{
+    "id": {"N": "9"},
+    "email": {"S": "user@example.com"},
+    "resend_webhook_secret": {"S": "whsec_your_resend_webhook_secret_here"},
     "created_at": {"N": "1716336000"},
     "updated_at": {"N": "1716336000"}
   }'

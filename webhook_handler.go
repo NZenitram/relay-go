@@ -58,6 +58,12 @@ func (h *WebhookHandler) ProcessWebhook(ctx context.Context, provider string, bo
 		} else {
 			userID, email, verifyErr = verifyPostmarkWebhookAndFindUserDynamoDB(h.dynamoDB, headers)
 		}
+	case "resend":
+		if database.IsMySQLKafkaMode() {
+			userID, email, verifyErr = verifyResendWebhookAndFindUser(h.db, body, headers)
+		} else {
+			userID, email, verifyErr = verifyResendWebhookAndFindUserDynamoDB(h.dynamoDB, body, headers)
+		}
 	case "mandrill":
 		// Mandrill verification needs special handling since it requires form params
 		// This will be called from the main handler with proper params

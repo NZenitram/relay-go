@@ -120,13 +120,21 @@ type UserData struct {
 func verifyWebhookSignature(ctx context.Context, verificationKey string, body []byte, signature, timestamp string) (bool, error) {
 	ecdaKey, err := eventwebhook.ConvertPublicKeyBase64ToECDSA(verificationKey)
 	if err != nil {
-		logger.Error(ctx, "sendgrid-verification", "Cannot convert public key", err)
+		logger.Error(ctx, "sendgrid-verification", "Cannot convert public key", err, map[string]interface{}{
+			"verification_key_length": len(verificationKey),
+			"verification_key_prefix": verificationKey[:20] + "...",
+		})
 		return false, fmt.Errorf("cannot convert public key: %v", err)
 	}
 
 	valid, err := eventwebhook.VerifySignature(ecdaKey, body, signature, timestamp)
 	if err != nil {
-		logger.Error(ctx, "sendgrid-verification", "Signature verification failed", err)
+		logger.Error(ctx, "sendgrid-verification", "Signature verification failed", err, map[string]interface{}{
+			"signature":               signature,
+			"timestamp":               timestamp,
+			"body_length":             len(body),
+			"verification_key_length": len(verificationKey),
+		})
 		return false, fmt.Errorf("signature verification failed: %v", err)
 	}
 
@@ -245,7 +253,6 @@ func verifySendgridWebhookAndFindUser(db *sql.DB, body []byte, headers http.Head
 
 func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []byte, headers http.Header) (int, string, error) {
 	ctx := context.Background()
-	logger.Info(ctx, "sendgrid-verification", "Starting DynamoDB verification", nil)
 	signature := headers.Get("X-Twilio-Email-Event-Webhook-Signature")
 	timestamp := headers.Get("X-Twilio-Email-Event-Webhook-Timestamp")
 
@@ -262,11 +269,17 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 		return 0, "", fmt.Errorf("dynamodb scan failed: %v", err)
 	}
 
-	logger.Info(ctx, "sendgrid-verification", "DynamoDB scan results", map[string]interface{}{
-		"items_found": len(result.Items),
-	})
+	if len(result.Items) == 0 {
+		logger.Error(ctx, "sendgrid-verification", "No users found with SendGrid verification keys", nil, map[string]interface{}{
+			"total_users_found": 0,
+			"signature":         signature,
+			"timestamp":         timestamp,
+			"body_length":       len(body),
+		})
+		return 0, "", fmt.Errorf("no users have sendgrid_verification_key configured")
+	}
 
-	for _, item := range result.Items {
+	for i, item := range result.Items {
 		// Get user ID
 		var userID string
 		switch idValue := item["id"].(type) {
@@ -275,26 +288,20 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 		case *types.AttributeValueMemberS:
 			userID = idValue.Value
 		default:
-			logger.Error(ctx, "sendgrid-verification", "Unexpected ID type for DynamoDB item", nil)
+			logger.Error(ctx, "sendgrid-verification", "Unexpected ID type for DynamoDB item", nil, map[string]interface{}{
+				"user_index": i,
+				"id_type":    fmt.Sprintf("%T", item["id"]),
+			})
 			continue
 		}
 
 		verificationKey := item["sendgrid_verification_key"].(*types.AttributeValueMemberS).Value
 		email := item["email"].(*types.AttributeValueMemberS).Value
 
-		logger.Info(ctx, "sendgrid-verification", "Checking DynamoDB user", map[string]interface{}{
-			"user_id": userID,
-			"email":   email,
-		})
-
 		// Try to get user data from cache
 		cachedUser, cacheHit, err := getUserDataFromCache(ctx, userID)
 		if err == nil && cacheHit {
 			verificationKey = cachedUser.SendGridVerificationKey
-			logger.Info(ctx, "sendgrid-verification", "Using cached verification key for DynamoDB user", map[string]interface{}{
-				"user_id":   userID,
-				"cache_hit": true,
-			})
 		} else {
 			// Cache miss or error, store in cache
 			userData := UserData{
@@ -311,15 +318,10 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 
 		valid, err := verifyWebhookSignature(ctx, verificationKey, body, signature, timestamp)
 		if err != nil {
-			logger.Error(ctx, "sendgrid-verification", "DynamoDB user verification failed", err)
 			continue
 		}
 
 		if valid {
-			logger.Info(ctx, "sendgrid-verification", "Found valid DynamoDB user", map[string]interface{}{
-				"user_id": userID,
-				"email":   email,
-			})
 			userIDInt, err := strconv.Atoi(userID)
 			if err != nil {
 				logger.Error(ctx, "sendgrid-verification", "Invalid user ID format", err)
@@ -329,7 +331,7 @@ func verifySendgridWebhookAndFindUserDynamoDB(client *dynamodb.Client, body []by
 		}
 	}
 
-	logger.Info(ctx, "sendgrid-verification", "DynamoDB verification complete", nil)
+	logger.Error(ctx, "sendgrid-verification", "No matching user found after checking all users", nil)
 	return 0, "", fmt.Errorf("no matching user found for the given webhook signature: %v", signature)
 }
 

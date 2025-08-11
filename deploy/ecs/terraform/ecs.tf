@@ -78,6 +78,28 @@ resource "aws_iam_role_policy" "secrets_access" {
   })
 }
 
+# ECR access policy for execution role
+resource "aws_iam_role_policy" "ecr_access" {
+  name = "${var.environment}-relay-go-ecr-access"
+  role = aws_iam_role.ecs_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:BatchGetImage"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
 # ECS Task Role
 resource "aws_iam_role" "ecs_task_role" {
   name = "${var.environment}-relay-go-task-role"
