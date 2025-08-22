@@ -1,0 +1,338 @@
+package database
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"relay-go/m/logger"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/xitongsys/parquet-go/parquet"
+	"github.com/xitongsys/parquet-go/writer"
+	"github.com/xitongsys/parquet-go-source/local"
+)
+
+// ParquetEvent represents the schema for PARQUET storage
+type ParquetEvent struct {
+	// Core fields
+	EventID   string `parquet:"name=event_id, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
+	EventType string `parquet:"name=event_type, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
+	Timestamp int64  `parquet:"name=timestamp, type=INT64, convertedtype=TIMESTAMP_MILLIS"`
+	Provider  string `parquet:"name=provider, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
+	
+	// User and recipient information
+	UserID   int64  `parquet:"name=user_id, type=INT64"`
+	Email    string `parquet:"name=email, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
+	Username string `parquet:"name=sh_username, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY"`
+	
+	// Message tracking
+	MessageID string `parquet:"name=message_id, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN"`
+	SMTPID    string `parquet:"name=smtp_id, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN, repetitiontype=OPTIONAL"`
+	Subject   string `parquet:"name=subject, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	
+	// Event details
+	Categories string `parquet:"name=categories, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	Reason     string   `parquet:"name=reason, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	ErrorCode  string   `parquet:"name=error_code, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	BounceType string   `parquet:"name=bounce_type, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY, repetitiontype=OPTIONAL"`
+	
+	// Location and device info
+	IPAddress string `parquet:"name=ip_address, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	UserAgent string `parquet:"name=user_agent, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+	Country   string `parquet:"name=country, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY, repetitiontype=OPTIONAL"`
+	City      string `parquet:"name=city, type=BYTE_ARRAY, convertedtype=UTF8, encoding=PLAIN_DICTIONARY, repetitiontype=OPTIONAL"`
+	
+	// Store raw metadata as JSON for flexibility
+	RawMetadata string `parquet:"name=raw_metadata, type=BYTE_ARRAY, convertedtype=UTF8, repetitiontype=OPTIONAL"`
+}
+
+// ParquetBatchWriter handles writing events to PARQUET format
+type ParquetBatchWriter struct {
+	s3Client   *s3.Client
+	bucketName string
+	enabled    bool
+}
+
+// NewParquetBatchWriter creates a new PARQUET writer
+func NewParquetBatchWriter(s3Client *s3.Client, bucketName string) *ParquetBatchWriter {
+	enabled := os.Getenv("ENABLE_PARQUET_OUTPUT") == "true"
+	
+	if enabled {
+		logger.Info(nil, "parquet-writer", "PARQUET output enabled", map[string]interface{}{
+			"bucket": bucketName,
+		})
+	}
+	
+	return &ParquetBatchWriter{
+		s3Client:   s3Client,
+		bucketName: bucketName,
+		enabled:    enabled,
+	}
+}
+
+// WriteParquetBatch writes a batch of events to S3 in PARQUET format
+func (w *ParquetBatchWriter) WriteParquetBatch(ctx context.Context, events []json.RawMessage, provider string, userID int64, username string) error {
+	return w.WriteParquetBatchWithTimestamp(ctx, events, provider, userID, username, time.Time{})
+}
+
+// WriteParquetBatchWithTimestamp writes a batch of events to S3 in PARQUET format with optional timestamp preservation
+func (w *ParquetBatchWriter) WriteParquetBatchWithTimestamp(ctx context.Context, events []json.RawMessage, provider string, userID int64, username string, preserveTimestamp time.Time) error {
+	if !w.enabled {
+		return nil // Skip if PARQUET output is disabled
+	}
+	
+	logger.Info(ctx, "parquet-writer", "Starting PARQUET batch write", map[string]interface{}{
+		"provider":    provider,
+		"user_id":     userID,
+		"event_count": len(events),
+	})
+	
+	// Convert raw events to PARQUET events
+	parquetEvents := make([]ParquetEvent, 0, len(events))
+	
+	for _, rawEvent := range events {
+		pe, err := w.convertToParquetEvent(rawEvent, provider, userID, username)
+		if err != nil {
+			logger.Error(ctx, "parquet-writer", "Failed to convert event", err, map[string]interface{}{
+				"provider": provider,
+				"user_id":  userID,
+			})
+			continue
+		}
+		parquetEvents = append(parquetEvents, pe)
+	}
+	
+	if len(parquetEvents) == 0 {
+		logger.Warning(ctx, "parquet-writer", "No events to write after conversion", nil, map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+		})
+		return nil
+	}
+	
+	// Create temporary file for PARQUET data
+	tmpFile := fmt.Sprintf("/tmp/parquet_%d_%s_%d.tmp", userID, provider, time.Now().UnixNano())
+	fw, err := local.NewLocalFileWriter(tmpFile)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file writer: %w", err)
+	}
+	defer func() {
+		fw.Close()
+		os.Remove(tmpFile) // Clean up temp file
+	}()
+	
+	// Create PARQUET writer
+	pw, err := writer.NewParquetWriter(fw, new(ParquetEvent), 4)
+	if err != nil {
+		return fmt.Errorf("failed to create parquet writer: %w", err)
+	}
+	
+	// Configure writer settings
+	pw.RowGroupSize = 128 * 1024 * 1024        // 128MB row groups
+	pw.PageSize = 8 * 1024                     // 8KB pages
+	pw.CompressionType = parquet.CompressionCodec_SNAPPY
+	
+	// Write events
+	for _, event := range parquetEvents {
+		if err := pw.Write(event); err != nil {
+			logger.Error(ctx, "parquet-writer", "Failed to write event", err)
+			continue
+		}
+	}
+	
+	// Close writer to flush data
+	if err := pw.WriteStop(); err != nil {
+		return fmt.Errorf("failed to close parquet writer: %w", err)
+	}
+	fw.Close() // Close the file writer
+	
+	// Read the temp file for upload
+	fileData, err := os.ReadFile(tmpFile)
+	if err != nil {
+		return fmt.Errorf("failed to read temp parquet file: %w", err)
+	}
+	
+	// Determine timestamp for S3 path
+	var pathTimestamp time.Time
+	
+	// If preserveTimestamp is provided (historical mode), use it
+	if !preserveTimestamp.IsZero() {
+		pathTimestamp = preserveTimestamp
+	} else if len(parquetEvents) > 0 {
+		// Try to extract timestamp from first event for historical data
+		// This is useful when processing historical data through test mode
+		pathTimestamp = time.Unix(parquetEvents[0].Timestamp/1000, 0)
+	} else {
+		// Default to current time (production mode)
+		pathTimestamp = time.Now()
+	}
+	
+	// Generate S3 key for PARQUET file using appropriate timestamp
+	s3Key := fmt.Sprintf("events/user_%d/%s/%04d/%02d/%02d/%02d/events_%s_%d.parquet",
+		userID,
+		provider,
+		pathTimestamp.Year(), pathTimestamp.Month(), pathTimestamp.Day(), pathTimestamp.Hour(),
+		pathTimestamp.Format("20060102150405"),
+		time.Now().UnixNano(), // Use current nano for uniqueness
+	)
+	
+	// Upload to S3
+	_, err = w.s3Client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(w.bucketName),
+		Key:         aws.String(s3Key),
+		Body:        bytes.NewReader(fileData),
+		ContentType: aws.String("application/octet-stream"),
+		Metadata: map[string]string{
+			"format":      "parquet",
+			"provider":    provider,
+			"user_id":     fmt.Sprintf("%d", userID),
+			"event_count": fmt.Sprintf("%d", len(parquetEvents)),
+			"compression": "snappy",
+		},
+	})
+	
+	if err != nil {
+		return fmt.Errorf("failed to upload parquet to S3: %w", err)
+	}
+	
+	logger.Info(ctx, "parquet-writer", "Successfully wrote PARQUET batch", map[string]interface{}{
+		"provider":    provider,
+		"user_id":     userID,
+		"s3_key":      s3Key,
+		"event_count": len(parquetEvents),
+		"file_size":   len(fileData),
+	})
+	
+	return nil
+}
+
+// convertToParquetEvent converts a raw JSON event to ParquetEvent
+func (w *ParquetBatchWriter) convertToParquetEvent(rawEvent json.RawMessage, provider string, userID int64, username string) (ParquetEvent, error) {
+	var eventMap map[string]interface{}
+	if err := json.Unmarshal(rawEvent, &eventMap); err != nil {
+		return ParquetEvent{}, err
+	}
+	
+	pe := ParquetEvent{
+		Provider: provider,
+		UserID:   userID,
+		Username: username,
+	}
+	
+	// Extract core fields
+	if v, ok := eventMap["event_id"].(string); ok {
+		pe.EventID = v
+	} else if v, ok := eventMap["sg_event_id"].(string); ok {
+		pe.EventID = v
+	} else if v, ok := eventMap["_id"].(string); ok {
+		pe.EventID = v
+	}
+	
+	if v, ok := eventMap["event"].(string); ok {
+		pe.EventType = v
+	} else if v, ok := eventMap["event_type"].(string); ok {
+		pe.EventType = v
+	}
+	
+	// Handle timestamp
+	if v, ok := eventMap["timestamp"].(float64); ok {
+		pe.Timestamp = int64(v * 1000) // Convert to milliseconds
+	} else if v, ok := eventMap["ts"].(float64); ok {
+		pe.Timestamp = int64(v * 1000)
+	} else {
+		pe.Timestamp = time.Now().UnixMilli()
+	}
+	
+	// Extract email
+	if v, ok := eventMap["email"].(string); ok {
+		pe.Email = v
+	} else if v, ok := eventMap["recipient"].(string); ok {
+		pe.Email = v
+	}
+	
+	// Extract message ID
+	if v, ok := eventMap["message_id"].(string); ok {
+		pe.MessageID = v
+	} else if v, ok := eventMap["sg_message_id"].(string); ok {
+		pe.MessageID = v
+	} else if v, ok := eventMap["MessageID"].(string); ok { // Postmark style
+		pe.MessageID = v
+	}
+	
+	// Extract subject
+	if v, ok := eventMap["subject"].(string); ok {
+		pe.Subject = v
+	}
+	
+	// Extract SMTP ID
+	if v, ok := eventMap["smtp-id"].(string); ok {
+		pe.SMTPID = v
+	} else if v, ok := eventMap["smtp_id"].(string); ok {
+		pe.SMTPID = v
+	}
+	
+	// Extract categories (store as JSON string)
+	if cats, ok := eventMap["category"].([]interface{}); ok {
+		catStrings := make([]string, 0, len(cats))
+		for _, cat := range cats {
+			if s, ok := cat.(string); ok {
+				catStrings = append(catStrings, s)
+			}
+		}
+		if len(catStrings) > 0 {
+			catJSON, _ := json.Marshal(catStrings)
+			pe.Categories = string(catJSON)
+		}
+	} else if catStr, ok := eventMap["category"].(string); ok {
+		// Single category as string
+		pe.Categories = catStr
+	}
+	
+	// Extract error details
+	if v, ok := eventMap["reason"].(string); ok {
+		pe.Reason = v
+	}
+	if v, ok := eventMap["error_code"].(string); ok {
+		pe.ErrorCode = v
+	} else if v, ok := eventMap["response"].(string); ok {
+		pe.ErrorCode = v
+	}
+	if v, ok := eventMap["bounce_type"].(string); ok {
+		pe.BounceType = v
+	} else if v, ok := eventMap["type"].(string); ok {
+		pe.BounceType = v
+	}
+	
+	// Extract location/device info
+	if v, ok := eventMap["ip"].(string); ok {
+		pe.IPAddress = v
+	} else if v, ok := eventMap["ip_address"].(string); ok {
+		pe.IPAddress = v
+	}
+	
+	if v, ok := eventMap["useragent"].(string); ok {
+		pe.UserAgent = v
+	} else if v, ok := eventMap["user_agent"].(string); ok {
+		pe.UserAgent = v
+	}
+	
+	// Extract geo data
+	if geo, ok := eventMap["geo"].(map[string]interface{}); ok {
+		if v, ok := geo["country"].(string); ok {
+			pe.Country = v
+		}
+		if v, ok := geo["city"].(string); ok {
+			pe.City = v
+		}
+	}
+	
+	// Don't store the entire raw event - defeats the purpose of PARQUET compression
+	// Only store fields we haven't extracted if needed for debugging
+	// pe.RawMetadata = string(rawEvent) // REMOVED - this doubles storage size!
+	
+	return pe, nil
+}

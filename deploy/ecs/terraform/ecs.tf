@@ -14,7 +14,7 @@ resource "aws_ecs_cluster" "main" {
 # CloudWatch Log Groups
 resource "aws_cloudwatch_log_group" "app" {
   name              = "/ecs/relay-go"
-  retention_in_days = 30
+  retention_in_days = 5
 
   tags = {
     Name        = "${var.environment}-relay-go-logs"
@@ -24,7 +24,7 @@ resource "aws_cloudwatch_log_group" "app" {
 
 resource "aws_cloudwatch_log_group" "redis" {
   name              = "/ecs/relay-go-redis"
-  retention_in_days = 30
+  retention_in_days = 5
 
   tags = {
     Name        = "${var.environment}-relay-go-redis-logs"
@@ -78,27 +78,27 @@ resource "aws_iam_role_policy" "secrets_access" {
   })
 }
 
-# ECR access policy for execution role
-resource "aws_iam_role_policy" "ecr_access" {
-  name = "${var.environment}-relay-go-ecr-access"
-  role = aws_iam_role.ecs_execution_role.id
+# # ECR access policy for execution role
+# resource "aws_iam_role_policy" "ecr_access" {
+#   name = "${var.environment}-relay-go-ecr-access"
+#   role = aws_iam_role.ecs_execution_role.id
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "ecr:GetAuthorizationToken",
-          "ecr:BatchCheckLayerAvailability",
-          "ecr:GetDownloadUrlForLayer",
-          "ecr:BatchGetImage"
-        ]
-        Resource = "*"
-      }
-    ]
-  })
-}
+#   policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [
+#       {
+#         Effect = "Allow"
+#         Action = [
+#           "ecr:GetAuthorizationToken",
+#           "ecr:BatchCheckLayerAvailability",
+#           "ecr:GetDownloadUrlForLayer",
+#           "ecr:BatchGetImage"
+#         ]
+#         Resource = "*"
+#       }
+#     ]
+#   })
+# }
 
 # ECS Task Role
 resource "aws_iam_role" "ecs_task_role" {
@@ -136,7 +136,8 @@ resource "aws_iam_role_policy" "dynamodb_access" {
           "dynamodb:Scan",
           "dynamodb:Query",
           "dynamodb:ListTables",
-          "dynamodb:DescribeTable"
+          "dynamodb:DescribeTable",
+          "dynamodb:BatchGetItem"
         ]
         Resource = [
           aws_dynamodb_table.users.arn,
@@ -176,8 +177,10 @@ resource "aws_ecs_task_definition" "main" {
   family                   = "${var.environment}-relay-go"
   network_mode            = "awsvpc"
   requires_compatibilities = ["FARGATE"]
-  cpu                     = 512   # Original value before Kafka
-  memory                  = 1024  # Original value before Kafka
+  # cpu                     = 512   # Original value before Kafka
+  # memory                  = 1024  # Original value before Kafka
+  cpu                     = 1024
+  memory                  = 2048
   execution_role_arn      = aws_iam_role.ecs_execution_role.arn
   task_role_arn           = aws_iam_role.ecs_task_role.arn
 
@@ -199,7 +202,7 @@ resource "aws_ecs_task_definition" "main" {
   container_definitions = jsonencode([
     {
       name      = "relay-go"
-      image     = "${var.ecr_repository_url}:latest"
+      image     = "${var.ecr_repository_url}:v2.0.1-amd64"
       essential = true
       dependsOn = [
         {
@@ -238,6 +241,14 @@ resource "aws_ecs_task_definition" "main" {
         {
           name  = "LOG_LEVEL"
           value = "ERROR"
+        },
+        {
+          name  = "ENABLE_PARQUET_OUTPUT"
+          value = "true"
+        },
+        {
+          name  = "ENABLE_PARALLEL_PARQUET"
+          value = "true"
         },
         {
           name  = "KAFKA_BROKERS"

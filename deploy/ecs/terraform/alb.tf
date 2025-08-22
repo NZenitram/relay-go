@@ -71,10 +71,43 @@ resource "aws_lb_listener" "https" {
   }
 }
 
+resource "aws_lb_listener_rule" "analytics_service" {
+  listener_arn = aws_lb_listener.https.arn
+  priority     = 10
+
+  action {
+    type = "forward"
+    
+    forward {
+      target_group {
+        arn = "arn:aws:elasticloadbalancing:us-east-2:998623545110:targetgroup/relay-go-analytics-tg/43bf3dee415fe3da"
+      }
+      
+      stickiness {
+        enabled  = true
+        duration = 3600
+      }
+    }
+  }
+
+  condition {
+    host_header {
+      values = ["app.soazcloud.com", "app.deliveriq.net"]
+    }
+  }
+
+  tags = {
+    Component   = "analytics-dashboard"
+    Environment = "production"
+    ManagedBy   = "terraform"
+    Project     = "relay-go-analytics"
+  }
+}
+
 # HTTPS Listener Rule for ECS Service
 resource "aws_lb_listener_rule" "ecs_service" {
   listener_arn = aws_lb_listener.https.arn
-  priority     = 1
+  priority     = 100
 
   action {
     type             = "forward"
@@ -83,7 +116,7 @@ resource "aws_lb_listener_rule" "ecs_service" {
 
   condition {
     host_header {
-      values = ["soazcloud.com", "*.soazcloud.com"]
+      values = ["soazcloud.com", "*.soazcloud.com","ingest.deliveriq.net"]
     }
   }
 }

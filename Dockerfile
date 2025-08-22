@@ -1,5 +1,6 @@
 # Use the official Golang image as the base image
-FROM golang:1.23-alpine AS builder
+# Explicitly use AMD64 platform for Fargate compatibility
+FROM --platform=linux/amd64 golang:1.23-alpine AS builder
 
 # Set the Current Working Directory inside the container
 WORKDIR /app
@@ -20,7 +21,8 @@ ENV GOOS=linux GOARCH=amd64
 RUN go build -o relay-go .
 
 # Start a new stage from scratch
-FROM alpine:latest  
+# Explicitly use AMD64 platform for runtime
+FROM --platform=linux/amd64 alpine:latest  
 
 # Set the Current Working Directory inside the container
 WORKDIR /root/

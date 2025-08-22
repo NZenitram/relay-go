@@ -82,6 +82,7 @@ func loadConfig() (*Config, error) {
 
 var splunkClient *webhook.SplunkClient
 var webhookHandler *WebhookHandler
+var testWebhookHandler *TestWebhookHandler
 var config *Config
 
 func init() {
@@ -121,6 +122,9 @@ func init() {
 
 	// Initialize webhook handler
 	webhookHandler = NewWebhookHandler(database.GetDB(), database.GetDynamoClient())
+	
+	// Initialize test webhook handler for PARQUET testing
+	testWebhookHandler = NewTestWebhookHandler(database.GetDB(), database.GetDynamoClient())
 }
 
 // createEventProcessor creates the appropriate event processor based on mode and configuration
@@ -214,10 +218,24 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		userID, email, err := webhookHandler.ProcessWebhook(providerCtx, "sendgrid", body, r.Header)
-		if err != nil {
-			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
-			return
+		var userID int
+		var email string
+
+		// Check if this is a test mode request
+		if IsTestMode(r) {
+			var err error
+			userID, email, err = testWebhookHandler.ProcessTestWebhook(providerCtx, "sendgrid", body, r.Header)
+			if err != nil {
+				http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			var err error
+			userID, email, err = webhookHandler.ProcessWebhook(providerCtx, "sendgrid", body, r.Header)
+			if err != nil {
+				http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+				return
+			}
 		}
 
 		// Add user ID to context
@@ -259,10 +277,24 @@ func main() {
 		}
 		defer r.Body.Close()
 
-		userID, email, err := webhookHandler.ProcessWebhook(providerCtx, "sparkpost", body, r.Header)
-		if err != nil {
-			http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
-			return
+		var userID int
+		var email string
+
+		// Check if this is a test mode request
+		if IsTestMode(r) {
+			var err error
+			userID, email, err = testWebhookHandler.ProcessTestWebhook(providerCtx, "sparkpost", body, r.Header)
+			if err != nil {
+				http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+				return
+			}
+		} else {
+			var err error
+			userID, email, err = webhookHandler.ProcessWebhook(providerCtx, "sparkpost", body, r.Header)
+			if err != nil {
+				http.Error(w, "Failed to verify webhook", http.StatusUnauthorized)
+				return
+			}
 		}
 
 		// Add user ID to context

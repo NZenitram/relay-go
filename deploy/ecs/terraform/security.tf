@@ -50,6 +50,30 @@ resource "aws_security_group" "ecs_tasks" {
     self        = true
   }
 
+  ingress {
+    description = "Allow HTTP traffic to analytics service"
+    from_port   = 8090
+    to_port     = 8090
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Allow search service traffic within security group"
+    from_port   = 8091
+    to_port     = 8091
+    protocol    = "tcp"
+    self        = true
+  }
+
+  ingress {
+    description = "Allow all TCP traffic within security group"
+    from_port   = 0
+    to_port     = 65535
+    protocol    = "tcp"
+    self        = true
+  }
+
   egress {
     from_port   = 0
     to_port     = 0

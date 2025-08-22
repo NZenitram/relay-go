@@ -92,10 +92,11 @@ type GeoIP struct {
 
 // EventBatcher handles batching of webhook events for S3 storage
 type EventBatcher struct {
-	redisClient *redis.Client
-	s3Client    *s3.Client
-	config      BatchConfig
-	bucketName  string
+	redisClient    *redis.Client
+	s3Client       *s3.Client
+	config         BatchConfig
+	bucketName     string
+	parquetWriter  *ParquetBatchWriter // Add PARQUET writer
 }
 
 var (
@@ -107,31 +108,75 @@ var (
 func GetEventBatcher() *EventBatcher {
 	eventBatcherOnce.Do(func() {
 		redisClient := redis.NewClient(&redis.Options{
-			Addr: os.Getenv("REDIS_HOST"),
+			Addr:     os.Getenv("REDIS_HOST"),
+			Password: os.Getenv("REDIS_PASSWORD"), // Add password support
 		})
 
-		var awsCfg aws.Config
-		var err error
-		if os.Getenv("DEV_MODE") == "true" {
-			awsCfg, err = config.LoadDefaultConfig(context.Background(),
-				config.WithRegion(os.Getenv("AWS_REGION")),
-				config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-					os.Getenv("AWS_ACCESS_KEY_ID"),
-					os.Getenv("AWS_SECRET_ACCESS_KEY"),
-					os.Getenv("AWS_SESSION_TOKEN"),
-				)),
-			)
-		} else {
-			awsCfg, err = config.LoadDefaultConfig(context.Background())
+		// Load AWS configuration with proper endpoint resolver
+		opts := []func(*config.LoadOptions) error{
+			config.WithRegion(func() string {
+				if region := os.Getenv("AWS_REGION"); region != "" {
+					return region
+				}
+				return "us-east-1"
+			}()),
 		}
+
+		// Check for custom S3 endpoint (e.g., MinIO)
+		if endpoint := os.Getenv("S3_ENDPOINT_URL"); endpoint != "" {
+			logger.Info(nil, "event-batcher", "Using custom S3 endpoint", map[string]interface{}{
+				"endpoint": endpoint,
+			})
+			// When using MinIO or custom endpoint, use explicit credentials
+			accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+			secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+			
+			if accessKey != "" && secretKey != "" {
+				opts = append(opts, config.WithCredentialsProvider(
+					credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+				))
+			}
+
+			// Configure endpoint resolver at the AWS SDK config level
+			opts = append(opts, config.WithEndpointResolverWithOptions(
+				aws.EndpointResolverWithOptionsFunc(
+					func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+						if service == s3.ServiceID {
+							return aws.Endpoint{
+								URL:               endpoint,
+								HostnameImmutable: true,
+								SigningRegion:     region,
+							}, nil
+						}
+						return aws.Endpoint{}, &aws.EndpointNotFoundError{}
+					},
+				),
+			))
+		} else if os.Getenv("DEV_MODE") == "true" {
+			// Dev mode with real AWS (if not using MinIO)
+			accessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+			secretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+			if accessKey != "" && secretKey != "" {
+				opts = append(opts, config.WithCredentialsProvider(
+					credentials.NewStaticCredentialsProvider(accessKey, secretKey, ""),
+				))
+			}
+		}
+
+		awsCfg, err := config.LoadDefaultConfig(context.Background(), opts...)
 		if err != nil {
 			logger.Fatal(nil, "init", "Failed to load AWS config", err)
 		}
 
-		// Create S3 client with custom endpoint resolver
-		s3Client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-			o.UsePathStyle = true // Use path-style addressing
-		})
+		// Create S3 client with path-style addressing for MinIO compatibility
+		s3Options := []func(*s3.Options){}
+		if os.Getenv("S3_ENDPOINT_URL") != "" {
+			s3Options = append(s3Options, func(o *s3.Options) {
+				o.UsePathStyle = true
+			})
+		}
+		
+		s3Client := s3.NewFromConfig(awsCfg, s3Options...)
 
 		// Default to production settings
 		batcherConfig := BatchConfig{
@@ -159,10 +204,19 @@ func GetEventBatcher() *EventBatcher {
 			})
 		}
 
-		eventBatcher = NewEventBatcher(redisClient, s3Client, batcherConfig, os.Getenv("S3_BUCKET_NAME"))
+		bucketName := os.Getenv("S3_BUCKET_NAME")
+		eventBatcher = NewEventBatcher(redisClient, s3Client, batcherConfig, bucketName)
+		
+		// Initialize PARQUET writer if enabled
+		eventBatcher.parquetWriter = NewParquetBatchWriter(s3Client, bucketName)
 
-		// Start the batch worker
+		// Start the batch worker for regular JSON processing
 		go eventBatcher.StartBatchWorker(context.Background())
+		
+		// Start a separate batch worker for PARQUET users with optimized settings
+		if os.Getenv("ENABLE_PARALLEL_PARQUET") == "true" {
+			go eventBatcher.StartParquetBatchWorker(context.Background())
+		}
 	})
 	return eventBatcher
 }
@@ -211,7 +265,28 @@ func (b *EventBatcher) AddEvent(ctx context.Context, event json.RawMessage, prov
 		logger.Error(ctx, "event-batcher", "Failed to marshal modified event", err)
 		return fmt.Errorf("failed to marshal modified event: %w", err)
 	}
+	
+	// PARALLEL PARQUET PROCESSOR: Duplicate event to 9999X user for PARQUET processing
+	// This runs in parallel with normal JSON processing
+	if os.Getenv("ENABLE_PARALLEL_PARQUET") == "true" {
+		parquetUserID := 99990000 + userID // e.g., user 6 becomes 99990006
+		go func() {
+			// Add the same event for the PARQUET user (fire and forget)
+			if err := b.addEventInternal(context.Background(), modifiedEvent, provider, parquetUserID, email); err != nil {
+				logger.Error(ctx, "event-batcher", "Failed to add parallel PARQUET event", err, map[string]interface{}{
+					"original_user_id": userID,
+					"parquet_user_id":  parquetUserID,
+				})
+			}
+		}()
+	}
 
+	// Process the original event normally
+	return b.addEventInternal(ctx, modifiedEvent, provider, userID, email)
+}
+
+// addEventInternal is the actual implementation of adding events to Redis
+func (b *EventBatcher) addEventInternal(ctx context.Context, modifiedEvent []byte, provider string, userID int64, email string) error {
 	// Check Redis memory usage
 	info, err := b.redisClient.Info(ctx, "memory").Result()
 	if err != nil {
@@ -335,6 +410,35 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string, userID
 		return nil
 	}
 
+	// Determine processing format based on user ID ranges:
+	// 1. Legacy customers (ID < 99990000): Process as JSON, duplicate to shadow for PARQUET testing
+	// 2. Shadow users (99990000-99999999): Process as PARQUET for parallel testing
+	// 3. New customers (ID >= 100000000, Snowflake IDs): Process as PARQUET directly
+	
+	if userID >= 99990000 && userID < 100000000 {
+		// Shadow user for parallel PARQUET testing
+		// These are duplicates of legacy customers for testing PARQUET processing
+		logger.Debug(ctx, "event-batcher", "Processing shadow user as PARQUET", map[string]interface{}{
+			"user_id":          userID,
+			"original_user_id": userID - 99990000,
+			"format":           "parquet",
+		})
+		return b.ProcessBatchAsParquet(ctx, provider, userID, events)
+	} else if userID >= 100000000 {
+		// New customer with Snowflake ID - process directly as PARQUET
+		// These are real customers created after PARQUET deployment
+		logger.Debug(ctx, "event-batcher", "Processing new customer as PARQUET", map[string]interface{}{
+			"user_id": userID,
+			"format":  "parquet",
+			"type":    "snowflake_id",
+		})
+		return b.ProcessBatchAsParquet(ctx, provider, userID, events)
+	}
+	
+	// Legacy customer (ID < 99990000) - process as JSON
+	// These will be duplicated to shadow users by the parallel processor
+
+	// Original processing for regular users
 	// Create batch ID
 	batchID := fmt.Sprintf("%s_%s_batch%d", provider, time.Now().Format("20060102150405"), time.Now().UnixNano())
 
@@ -417,7 +521,7 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string, userID
 	})
 
 	// In DEV_MODE, just log the events instead of uploading to S3
-	if os.Getenv("DEV_MODE") == "true" {
+	if os.Getenv("DEV_MODE") == "true" && false { // Disabled for now, we want real uploads
 		logger.Info(ctx, "event-batcher", "DEV_MODE: Would upload batch to S3", map[string]interface{}{
 			"provider":  provider,
 			"user_id":   userID,
@@ -428,7 +532,7 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string, userID
 			"checksum":  checksum,
 		})
 	} else {
-		// Upload to S3
+		// Upload JSON to S3 for legacy customers
 		_, err = b.s3Client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket:      aws.String(b.bucketName),
 			Key:         aws.String(s3Key),
@@ -447,7 +551,7 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string, userID
 			return fmt.Errorf("failed to upload batch to S3: %w", err)
 		}
 
-		logger.Info(ctx, "event-batcher", "Successfully uploaded batch to S3", map[string]interface{}{
+		logger.Info(ctx, "event-batcher", "Successfully uploaded JSON batch to S3", map[string]interface{}{
 			"provider":  provider,
 			"user_id":   userID,
 			"batch_id":  batchID,
@@ -510,7 +614,352 @@ func (b *EventBatcher) ProcessBatch(ctx context.Context, provider string, userID
 		"status":    metadata.Status,
 	})
 
+	// Legacy users should NOT get PARQUET - that's only for shadow/new users
+	// Skip PARQUET writing for legacy users (< 99990000)
+	if false && b.parquetWriter != nil {
+		// Get username and check for historical timestamp from the first event's metadata
+		username := ""
+		var historicalTimestamp time.Time
+		
+		if len(rawEvents) > 0 {
+			var firstEvent map[string]interface{}
+			if err := json.Unmarshal(rawEvents[0], &firstEvent); err == nil {
+				if v, ok := firstEvent["sh_username"].(string); ok {
+					username = v
+				}
+				
+				// For test users (99995-99999), preserve historical timestamps
+				if userID >= 99995 {
+					// Extract timestamp from event for historical preservation
+					if ts, ok := firstEvent["timestamp"].(float64); ok {
+						historicalTimestamp = time.Unix(int64(ts), 0)
+					}
+				}
+			}
+		}
+		
+		// Use appropriate method based on whether we need timestamp preservation
+		var err error
+		if !historicalTimestamp.IsZero() {
+			err = b.parquetWriter.WriteParquetBatchWithTimestamp(ctx, rawEvents, provider, userID, username, historicalTimestamp)
+		} else {
+			err = b.parquetWriter.WriteParquetBatch(ctx, rawEvents, provider, userID, username)
+		}
+		
+		if err != nil {
+			logger.Error(ctx, "event-batcher", "Failed to write PARQUET batch", err, map[string]interface{}{
+				"provider": provider,
+				"user_id":  userID,
+				"batch_id": batchID,
+			})
+			// Don't fail the whole operation if PARQUET write fails
+		}
+	}
+
 	return nil
+}
+
+// ProcessBatchAsParquet processes batch using PARQUET-optimized settings but outputs PARQUET
+func (b *EventBatcher) ProcessBatchAsParquet(ctx context.Context, provider string, userID int64, events map[string]string) error {
+	// Note: This function is called by StartBatchWorker which handles the optimized batching
+	// for PARQUET users (99990000+). The batching intervals are controlled there.
+	
+	// Convert events to raw JSON (same as production)
+	var rawEvents []json.RawMessage
+	for _, eventJSON := range events {
+		var eventData struct {
+			Event  json.RawMessage `json:"event"`
+			UserID int64           `json:"user_id"`
+		}
+		if err := json.Unmarshal([]byte(eventJSON), &eventData); err != nil {
+			logger.Error(ctx, "event-batcher", "Failed to unmarshal event data", err)
+			continue
+		}
+		rawEvents = append(rawEvents, eventData.Event)
+	}
+
+	if len(rawEvents) == 0 {
+		logger.Info(ctx, "event-batcher", "No events to process for PARQUET", map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+		})
+		return nil
+	}
+
+	logger.Info(ctx, "event-batcher", "Processing parallel PARQUET batch", map[string]interface{}{
+		"provider":    provider,
+		"user_id":     userID,
+		"event_count": len(rawEvents),
+	})
+
+	// Write PARQUET with current time (production-style batching)
+	if b.parquetWriter != nil {
+		// Get username from first event
+		username := ""
+		if len(rawEvents) > 0 {
+			var firstEvent map[string]interface{}
+			if err := json.Unmarshal(rawEvents[0], &firstEvent); err == nil {
+				if v, ok := firstEvent["sh_username"].(string); ok {
+					username = v
+				}
+			}
+		}
+		
+		// Write PARQUET batch using current time (like production JSON batches)
+		err := b.parquetWriter.WriteParquetBatch(ctx, rawEvents, provider, userID, username)
+		if err != nil {
+			logger.Error(ctx, "event-batcher", "Failed to write parallel PARQUET batch", err, map[string]interface{}{
+				"provider": provider,
+				"user_id":  userID,
+			})
+			return err
+		}
+		
+		logger.Info(ctx, "event-batcher", "Successfully wrote parallel PARQUET batch", map[string]interface{}{
+			"provider":    provider,
+			"user_id":     userID,
+			"event_count": len(rawEvents),
+		})
+	}
+
+	// Clear events from Redis
+	eventKey := fmt.Sprintf("provider:%s:user:%d:events", provider, userID)
+	err := b.redisClient.Del(ctx, eventKey).Err()
+	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to clear events from Redis", err)
+	}
+
+	// Clear metadata
+	metadataKey := fmt.Sprintf("provider:%s:user:%d:metadata", provider, userID)
+	b.redisClient.Del(ctx, metadataKey)
+
+	return nil
+}
+
+// ProcessBatchByTimestamp processes events grouped by their timestamp hour
+func (b *EventBatcher) ProcessBatchByTimestamp(ctx context.Context, provider string, userID int64, events map[string]string) error {
+	// Group events by hour based on their timestamp
+	eventsByHour := make(map[string][]json.RawMessage)
+	
+	for _, eventJSON := range events {
+		var eventData struct {
+			Event  json.RawMessage `json:"event"`
+			UserID int64           `json:"user_id"`
+		}
+		if err := json.Unmarshal([]byte(eventJSON), &eventData); err != nil {
+			logger.Error(ctx, "event-batcher", "Failed to unmarshal event data", err)
+			continue
+		}
+		
+		// Parse the actual event to get its timestamp
+		var eventMap map[string]interface{}
+		if err := json.Unmarshal(eventData.Event, &eventMap); err != nil {
+			logger.Error(ctx, "event-batcher", "Failed to parse event", err)
+			continue
+		}
+		
+		// Extract timestamp from event
+		var eventTime time.Time
+		if ts, ok := eventMap["timestamp"].(float64); ok {
+			eventTime = time.Unix(int64(ts), 0)
+		} else {
+			// Default to current time if no timestamp
+			eventTime = time.Now()
+		}
+		
+		// Create hour key: YYYY/MM/DD/HH
+		hourKey := fmt.Sprintf("%04d/%02d/%02d/%02d", 
+			eventTime.Year(), eventTime.Month(), eventTime.Day(), eventTime.Hour())
+		
+		eventsByHour[hourKey] = append(eventsByHour[hourKey], eventData.Event)
+	}
+	
+	logger.Info(ctx, "event-batcher", "Grouped events by hour", map[string]interface{}{
+		"provider":     provider,
+		"user_id":      userID,
+		"total_events": len(events),
+		"hour_groups":  len(eventsByHour),
+	})
+	
+	// Process each hour group as a separate batch
+	for hourKey, hourEvents := range eventsByHour {
+		if len(hourEvents) == 0 {
+			continue
+		}
+		
+		// Parse hour key to get timestamp
+		var year, month, day, hour int
+		fmt.Sscanf(hourKey, "%d/%d/%d/%d", &year, &month, &day, &hour)
+		batchTime := time.Date(year, time.Month(month), day, hour, 0, 0, 0, time.UTC)
+		
+		// Create batch ID for this hour
+		batchID := fmt.Sprintf("%s_%s_h%02d_batch%d", 
+			provider, batchTime.Format("20060102"), hour, time.Now().UnixNano())
+		
+		logger.Info(ctx, "event-batcher", "Processing hour batch", map[string]interface{}{
+			"provider":    provider,
+			"user_id":     userID,
+			"hour":        hourKey,
+			"event_count": len(hourEvents),
+			"batch_id":    batchID,
+		})
+		
+		// Only write PARQUET for test users
+		if b.parquetWriter != nil {
+			// Get username from first event
+			username := ""
+			if len(hourEvents) > 0 {
+				var firstEvent map[string]interface{}
+				if err := json.Unmarshal(hourEvents[0], &firstEvent); err == nil {
+					if v, ok := firstEvent["sh_username"].(string); ok {
+						username = v
+					}
+				}
+			}
+			
+			// Write PARQUET with the batch timestamp
+			err := b.parquetWriter.WriteParquetBatchWithTimestamp(ctx, hourEvents, provider, userID, username, batchTime)
+			if err != nil {
+				logger.Error(ctx, "event-batcher", "Failed to write PARQUET batch", err, map[string]interface{}{
+					"provider": provider,
+					"user_id":  userID,
+					"hour":     hourKey,
+					"batch_id": batchID,
+				})
+				// Continue processing other hours even if one fails
+				continue
+			}
+			
+			logger.Info(ctx, "event-batcher", "Successfully wrote PARQUET batch for hour", map[string]interface{}{
+				"provider":    provider,
+				"user_id":     userID,
+				"hour":        hourKey,
+				"event_count": len(hourEvents),
+			})
+		}
+	}
+	
+	// Clear all events from Redis after processing
+	eventKey := fmt.Sprintf("provider:%s:user:%d:events", provider, userID)
+	err := b.redisClient.Del(ctx, eventKey).Err()
+	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to clear events from Redis", err, map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+			"key":      eventKey,
+		})
+	} else {
+		logger.Info(ctx, "event-batcher", "Cleared events from Redis", map[string]interface{}{
+			"provider": provider,
+			"user_id":  userID,
+			"key":      eventKey,
+		})
+	}
+	
+	// Clear metadata
+	metadataKey := fmt.Sprintf("provider:%s:user:%d:metadata", provider, userID)
+	err = b.redisClient.Del(ctx, metadataKey).Err()
+	if err != nil {
+		logger.Error(ctx, "event-batcher", "Failed to clear metadata from Redis", err)
+	}
+	
+	return nil
+}
+
+// StartParquetBatchWorker starts a separate worker for PARQUET users with optimized settings
+func (b *EventBatcher) StartParquetBatchWorker(ctx context.Context) {
+	// PARQUET-optimized configuration
+	parquetConfig := BatchConfig{
+		MaxSize:         10000,             // 10K events (vs 10/1000 for JSON)
+		MaxBytes:        50 * 1024 * 1024, // 50MB (vs 1MB/5MB for JSON)
+		FlushInterval:   5 * time.Minute,  // 5 minutes (vs 30sec/5min for JSON)
+		MemoryThreshold: 70,                // 70% memory threshold
+	}
+	
+	// In DEV_MODE, use slightly smaller values for testing
+	if os.Getenv("DEV_MODE") == "true" {
+		parquetConfig = BatchConfig{
+			MaxSize:         5000,              // 5K events for dev testing
+			MaxBytes:        20 * 1024 * 1024, // 20MB
+			FlushInterval:   2 * time.Minute,  // 2 minutes
+			MemoryThreshold: 60,
+		}
+	}
+	
+	logger.Info(ctx, "event-batcher", "Starting PARQUET batch worker with optimized settings", map[string]interface{}{
+		"flush_interval": parquetConfig.FlushInterval,
+		"max_size":       parquetConfig.MaxSize,
+		"max_bytes":      parquetConfig.MaxBytes,
+		"memory_threshold": parquetConfig.MemoryThreshold,
+	})
+
+	ticker := time.NewTicker(parquetConfig.FlushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info(ctx, "event-batcher", "PARQUET batch worker shutting down")
+			return
+		case <-ticker.C:
+			// Process only PARQUET users (99990000+)
+			keys, err := b.redisClient.Keys(ctx, "provider:*:user:*:events").Result()
+			if err != nil {
+				logger.Error(ctx, "event-batcher", "Failed to get PARQUET user keys", err)
+				continue
+			}
+
+			for _, key := range keys {
+				// Extract userID from key
+				parts := strings.Split(key, ":")
+				if len(parts) != 5 {
+					continue
+				}
+				userID, err := strconv.ParseInt(parts[3], 10, 64)
+				if err != nil {
+					continue
+				}
+				
+				// Only process PARQUET parallel users
+				if userID < 99990000 {
+					continue
+				}
+				
+				provider := parts[1]
+				
+				// Check if batch should be flushed based on PARQUET-optimized thresholds
+				eventCount, err := b.redisClient.HLen(ctx, key).Result()
+				if err != nil {
+					continue
+				}
+				
+				// Check if we've hit the optimized thresholds OR if it's been 2 minutes (time-based flush)
+				// For PARQUET, we want larger batches but still need to flush periodically
+				if eventCount >= int64(parquetConfig.MaxSize) || eventCount > 0 {
+					// Process if we hit the size threshold OR if we have any events after the interval
+					reason := "time-based"
+					if eventCount >= int64(parquetConfig.MaxSize) {
+						reason = "size-threshold"
+					}
+					
+					logger.Info(ctx, "event-batcher", "Processing PARQUET batch", map[string]interface{}{
+						"provider": provider,
+						"user_id":  userID,
+						"count":    eventCount,
+						"max_size": parquetConfig.MaxSize,
+						"reason":   reason,
+					})
+					
+					if err := b.ProcessBatch(ctx, provider, userID); err != nil {
+						logger.Error(ctx, "event-batcher", "Failed to process PARQUET batch", err, map[string]interface{}{
+							"provider": provider,
+							"user_id":  userID,
+						})
+					}
+				}
+			}
+		}
+	}
 }
 
 // StartBatchWorker starts the background worker for batch processing
@@ -566,6 +1015,11 @@ func (b *EventBatcher) StartBatchWorker(ctx context.Context) {
 						"key":         key,
 						"user_id_str": parts[3],
 					})
+					continue
+				}
+				
+				// Skip PARQUET parallel users (they're handled by StartParquetBatchWorker)
+				if userID >= 99990000 {
 					continue
 				}
 
